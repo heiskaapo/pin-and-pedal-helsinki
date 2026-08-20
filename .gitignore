@@ -1,0 +1,6 @@
+.env
+pin-pedal-hosted.tgz
+dist/
+node_modules/
+.playwright-cli/
+

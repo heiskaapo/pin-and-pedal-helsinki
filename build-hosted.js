@@ -11,5 +11,28 @@ const sources = {
   '/map.css': ['map.css', 'text/css; charset=utf-8']
 };
 const files = Object.fromEntries(Object.entries(sources).map(([url, [file, type]]) => [url, { body: fs.readFileSync(path.join(root, file), 'utf8'), type }]));
-const worker = `const files=${JSON.stringify(files)};export default {fetch(request){const url=new URL(request.url);const file=files[url.pathname];if(file)return new Response(file.body,{headers:{'content-type':file.type,'cache-control':'no-store'}});return new Response('Not found',{status:404})}};`;
+const worker = `const files = ${JSON.stringify(files)};
+export default {
+  async fetch(request) {
+    const url = new URL(request.url);
+    if (url.pathname === '/api/config') {
+      return new Response(JSON.stringify({ mapboxPublicToken: process.env.MAPBOX_PUBLIC_TOKEN || '', googleMapsApiKey: process.env.GOOGLE_MAPS_API_KEY || '' }), {
+        headers: { 'content-type': 'application/json', 'cache-control': 'no-store' }
+      });
+    }
+    if (url.pathname === '/api/checkout' && request.method === 'POST') {
+      return new Response(JSON.stringify({ demo: true }), {
+        headers: { 'content-type': 'application/json', 'cache-control': 'no-store' }
+      });
+    }
+    const file = files[url.pathname];
+    if (file) {
+      return new Response(file.body, {
+        headers: { 'content-type': file.type, 'cache-control': 'no-store' }
+      });
+    }
+    return new Response('Not found', { status: 404 });
+  }
+};`;
 fs.writeFileSync(path.join(dist, 'index.js'), worker);
+
