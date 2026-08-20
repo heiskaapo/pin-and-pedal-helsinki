@@ -39,6 +39,8 @@ Pushes to `main` run tests and dependency audit, build the container in GitHub A
 
 Production readiness is exposed at `/api/readyz`. It intentionally returns 503 and names missing settings until Stripe is fully configured. Liveness is `/api/healthz`.
 
+`ALLOWED_ORIGINS` must include every public Cloud Run or custom-domain alias that serves the browser application. Separate multiple origins with `|` so operator session creation remains CSRF-protected across aliases.
+
 See `infrastructure/README.md` for GCP resources and provider setup.
 
 ## Privacy and operational rules

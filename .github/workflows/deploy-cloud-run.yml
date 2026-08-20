@@ -20,6 +20,7 @@ env:
   SERVICE: helsinki-bike-rescue
   RUNTIME_SERVICE_ACCOUNT: pin-pedal-runtime@bike-app-506110.iam.gserviceaccount.com
   PUBLIC_BASE_URL: https://helsinki-bike-rescue-lkqmr2vffq-lz.a.run.app
+  ALLOWED_ORIGINS: https://helsinki-bike-rescue-972142406578.europe-north1.run.app|https://helsinki-bike-rescue-lkqmr2vffq-lz.a.run.app
   STORAGE_BUCKET: bike-app-506110-pin-pedal-private
   IMAGE_REPOSITORY: europe-north1-docker.pkg.dev/bike-app-506110/cloud-run-source-deploy/helsinki-bike-rescue
 
@@ -62,7 +63,7 @@ jobs:
           --min-instances 0
           --max-instances 3
           --timeout 30
-          --update-env-vars "NODE_ENV=production,GCP_PROJECT_ID=$PROJECT_ID,GCP_LOCATION=$REGION,VERTEX_LOCATION=global,PUBLIC_BASE_URL=$PUBLIC_BASE_URL,STORAGE_BUCKET=$STORAGE_BUCKET,INTERNAL_SERVICE_ACCOUNT_EMAIL=pin-pedal-scheduler@$PROJECT_ID.iam.gserviceaccount.com,OPERATOR_ALLOWED_EMAILS=aapo.heiska@gmail.com,RETENTION_HOURS_AFTER_COMPLETION=24,BOOKING_TTL_DAYS=90"
+          --update-env-vars "NODE_ENV=production,GCP_PROJECT_ID=$PROJECT_ID,GCP_LOCATION=$REGION,VERTEX_LOCATION=global,PUBLIC_BASE_URL=$PUBLIC_BASE_URL,ALLOWED_ORIGINS=$ALLOWED_ORIGINS,STORAGE_BUCKET=$STORAGE_BUCKET,INTERNAL_SERVICE_ACCOUNT_EMAIL=pin-pedal-scheduler@$PROJECT_ID.iam.gserviceaccount.com,OPERATOR_ALLOWED_EMAILS=aapo.heiska@gmail.com,RETENTION_HOURS_AFTER_COMPLETION=24,BOOKING_TTL_DAYS=90"
           --update-secrets "MAPS_BROWSER_API_KEY=maps-browser-api-key:latest,IDENTITY_PLATFORM_API_KEY=identity-platform-api-key:latest,ROUTES_API_KEY=routes-api-key:latest,SESSION_COOKIE_SECRET=session-cookie-secret:latest,STRIPE_SECRET_KEY=stripe-secret-key:latest,STRIPE_WEBHOOK_SECRET=stripe-webhook-secret:latest"
           --startup-probe "httpGet.path=/api/healthz,initialDelaySeconds=0,timeoutSeconds=3,periodSeconds=5,failureThreshold=12"
           --liveness-probe "httpGet.path=/api/healthz,initialDelaySeconds=10,timeoutSeconds=3,periodSeconds=30,failureThreshold=3"
