@@ -1,66 +1,48 @@
-# Pin & Pedal — project handoff
+# Pin & Pedal production handoff
 
-## Project location
+## Current state
 
-`C:\Users\aapoh\.codex\.chatgpt-projects\g-p-6a85780edd2481919b346dfb4f43227e\MobileBikeMVP`
+The application is a single Cloud Run system backed by managed GCP services. The previous browser-only demo state, fake checkout, static jobs, client-side route estimation, hardcoded shared API key, Vercel endpoints, and OpenAI Sites hosting marker have been removed.
 
-## What this project is
+The live revision runs as `pin-pedal-runtime@bike-app-506110.iam.gserviceaccount.com`, not the default compute account. The legacy default Editor binding and unrestricted Maps key were retired after the real quote flow passed in production.
 
-A local MVP web app for a Helsinki/Espoo mobile bicycle puncture-repair service. Customers should be able to:
+## Architecture
 
-1. Say whether they have a key lock and must be present, or have a number lock and the repair can happen without them.
-2. Place a precise bike-location pin on a map.
-3. See a same-day price based on the repair’s additional travel time in the existing day route.
-4. Provide three private bike-identification photos, access details, and a phone number.
-5. Pay through Stripe Checkout when configured.
+- `server.js`: HTTP routing, security headers, rate limits, customer/operator/internal endpoints.
+- `lib/routing.js`: Google Routes and deterministic feasibility/pricing.
+- `lib/store.js`: transactional Firestore persistence and privacy projections.
+- `lib/payments.js`: Stripe Checkout, signed webhooks, expiry, cancellation, and refunds.
+- `lib/storage.js`: validated private photo storage and deletion.
+- `lib/auth.js`: Identity Platform verification, operator session, scheduler OIDC verification.
+- `lib/ai.js`: constrained Vertex AI slot recommendation and marketing draft.
+- `lib/notifications.js` / `lib/social.js`: explicit external-provider adapters.
+- `public/`: customer booking and authenticated operator UI.
 
-There is also an operator dashboard with seeded jobs, including four customer-present timed jobs and two flexible number-lock jobs.
+## GCP inventory
 
-## Run locally
+- Cloud Run service in `europe-north1`, maximum 3 instances.
+- Firestore Native in `europe-north1`; TTL field `bookings.deleteAt` is active.
+- Private bucket `bike-app-506110-pin-pedal-private`, uniform access and public-access prevention, 14-day lifecycle safety net.
+- Secret Manager core secrets: Maps browser key, Identity Platform browser key, Routes server key, session-cookie signing secret.
+- API-restricted/referrer-restricted browser keys and API-restricted server Routes key.
+- Dedicated runtime, scheduler, and GitHub deployer service accounts.
+- GitHub Workload Identity provider restricted to `heiskaapo/pin-and-pedal-helsinki` on `main`.
+- Daily retention job at 03:00 Europe/Helsinki in Scheduler region `europe-west1`.
+- Global HTTPS uptime check plus application-error and availability alert policies.
 
-Open PowerShell in the project folder and run:
+## Still requires owner-supplied provider configuration
 
-```powershell
-npm start
-```
+The service fails closed for checkout until new Stripe credentials and a webhook signing secret are stored. SMS, email, real social publishing, and the first operator account similarly require owner choices/credentials. Do not reuse the legacy live Stripe secret found in the local `.env`; rotate it in Stripe first.
 
-Then open `http://localhost:3000`.
+After adding each secret, grant only the runtime service account Secret Accessor on that secret and map it into Cloud Run and the GitHub deploy workflow. Set `OPERATOR_ALLOWED_EMAILS` to the explicit operator allowlist.
 
-## Configuration
+## Verification
 
-The local token file is `.env` in the project root. It is intentionally excluded from Git.
+- `npm test`
+- `npm run check`
+- `npm audit --omit=dev --audit-level=high`
+- `GET /api/healthz` must return 200.
+- `GET /api/readyz` must return 200 only when Stripe core configuration is present.
+- Submit a real quote, complete a Stripe test checkout, verify webhook-created `Booked` state, operator status notifications, cancellation refund, photo retrieval permissions, and retention deletion.
 
-- `MAPBOX_PUBLIC_TOKEN` — browser-safe Mapbox token beginning with `pk.`
-- `STRIPE_SECRET_KEY` — server-only Stripe secret key
-
-The local server exposes the Mapbox public token at `/api/config` and creates Stripe Checkout sessions at `/api/checkout`.
-
-## Important current issue to fix first
-
-The Mapbox map is currently not rendering reliably in the booking flow. The user has configured the Mapbox tokens. Please make the “Place your bike pin” step work end-to-end before making wider product changes.
-
-Expected behavior:
-
-- Mapbox map initializes only after booking step 2 is visible.
-- User clicks/taps a Helsinki/Espoo location.
-- A marker is placed and coordinates are stored in `#coords`.
-- For key-lock repairs, the time selector becomes enabled only after the pin is placed.
-- For number-lock repairs, no time selector is shown.
-- The price changes based on the incremental route travel time for the selected time window or best flexible route gap.
-
-Useful source files:
-
-- `public/index.html` — booking-flow markup
-- `public/app.js` — client behavior, routing quote, booking flow, Mapbox map
-- `public/map.css` — Mapbox map layout
-- `server.js` — local static server, `.env` loading, Mapbox public-token endpoint, Stripe Checkout endpoint
-
-## Hosting note
-
-A public Sites deployment was started previously, but its completion URL was not received. The local project has `.openai/hosting.json` and a hosted-build helper. Rebuild/redeploy only after the map works locally.
-
-## Security notes
-
-- Never put the Stripe secret key into browser JavaScript or committed files.
-- A Mapbox public token is expected to be visible to the browser but should have URL restrictions.
-- The user wants completed customer data deleted after work is complete; the current demo only displays that promise and does not yet implement a deletion job.
+The €10 GCP budget is an alert threshold, not a hard spending cap. Maximum Cloud Run instances and restricted APIs limit exposure, but billing alerts still require operator response.

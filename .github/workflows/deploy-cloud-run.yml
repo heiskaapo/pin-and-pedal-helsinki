@@ -1,0 +1,68 @@
+name: Test and deploy Cloud Run
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: pin-pedal-production
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: bike-app-506110
+  PROJECT_NUMBER: "972142406578"
+  REGION: europe-north1
+  SERVICE: helsinki-bike-rescue
+  RUNTIME_SERVICE_ACCOUNT: pin-pedal-runtime@bike-app-506110.iam.gserviceaccount.com
+  PUBLIC_BASE_URL: https://helsinki-bike-rescue-lkqmr2vffq-lz.a.run.app
+  STORAGE_BUCKET: bike-app-506110-pin-pedal-private
+  IMAGE_REPOSITORY: europe-north1-docker.pkg.dev/bike-app-506110/cloud-run-source-deploy/helsinki-bike-rescue
+
+jobs:
+  test-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm audit --omit=dev --audit-level=high
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/972142406578/locations/global/workloadIdentityPools/github/providers/pin-pedal
+          service_account: pin-pedal-deployer@bike-app-506110.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Authenticate Docker to Artifact Registry
+        run: gcloud auth configure-docker europe-north1-docker.pkg.dev --quiet
+      - name: Build and push tested image
+        run: |
+          docker build --tag "$IMAGE_REPOSITORY:$GITHUB_SHA" .
+          docker push "$IMAGE_REPOSITORY:$GITHUB_SHA"
+      - name: Deploy tested revision
+        run: >-
+          gcloud run deploy "$SERVICE"
+          --project "$PROJECT_ID"
+          --region "$REGION"
+          --image "$IMAGE_REPOSITORY:$GITHUB_SHA"
+          --service-account "$RUNTIME_SERVICE_ACCOUNT"
+          --allow-unauthenticated
+          --cpu 1
+          --memory 512Mi
+          --concurrency 40
+          --min-instances 0
+          --max-instances 3
+          --timeout 30
+          --update-env-vars "NODE_ENV=production,GCP_PROJECT_ID=$PROJECT_ID,GCP_LOCATION=$REGION,VERTEX_LOCATION=global,PUBLIC_BASE_URL=$PUBLIC_BASE_URL,STORAGE_BUCKET=$STORAGE_BUCKET,INTERNAL_SERVICE_ACCOUNT_EMAIL=pin-pedal-scheduler@$PROJECT_ID.iam.gserviceaccount.com,OPERATOR_ALLOWED_EMAILS=aapo.heiska@gmail.com,RETENTION_HOURS_AFTER_COMPLETION=24,BOOKING_TTL_DAYS=90"
+          --update-secrets "MAPS_BROWSER_API_KEY=maps-browser-api-key:latest,IDENTITY_PLATFORM_API_KEY=identity-platform-api-key:latest,ROUTES_API_KEY=routes-api-key:latest,SESSION_COOKIE_SECRET=session-cookie-secret:latest,STRIPE_SECRET_KEY=stripe-secret-key:latest,STRIPE_WEBHOOK_SECRET=stripe-webhook-secret:latest"
+          --startup-probe "httpGet.path=/api/healthz,initialDelaySeconds=0,timeoutSeconds=3,periodSeconds=5,failureThreshold=12"
+          --liveness-probe "httpGet.path=/api/healthz,initialDelaySeconds=10,timeoutSeconds=3,periodSeconds=30,failureThreshold=3"

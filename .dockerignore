@@ -1,0 +1,11 @@
+node_modules
+.git
+.github
+dist
+.env
+.env.*
+!.env.example
+.playwright-cli
+pin-pedal-hosted.tgz
+coverage
+*.log

@@ -1,6 +1,9 @@
 .env
+.env.*
+!.env.example
 pin-pedal-hosted.tgz
 dist/
 node_modules/
 .playwright-cli/
-
+coverage/
+*.log

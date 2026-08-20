@@ -1,7 +1,23 @@
 {
   "name": "helsinki-bike-rescue-mvp",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
-  "scripts": { "start": "node server.js", "build:hosted": "node build-hosted.js" },
-  "engines": { "node": ">=18" }
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test",
+    "check": "node --check server.js && node --check public/app.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@google/genai": "^2.18.0",
+    "firebase-admin": "^14.3.0",
+    "google-auth-library": "^10.3.0",
+    "stripe": "^18.5.0"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
+  }
 }

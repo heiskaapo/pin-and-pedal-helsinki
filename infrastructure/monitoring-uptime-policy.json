@@ -1,0 +1,27 @@
+{
+  "displayName": "Pin Pedal production unavailable",
+  "documentation": {
+    "content": "The public Cloud Run health endpoint failed from one or more Google uptime-check regions for five minutes.",
+    "mimeType": "text/markdown"
+  },
+  "combiner": "OR",
+  "enabled": true,
+  "conditions": [
+    {
+      "displayName": "HTTPS uptime failure",
+      "conditionThreshold": {
+        "filter": "resource.type = \"uptime_url\" AND metric.type = \"monitoring.googleapis.com/uptime_check/check_passed\" AND metric.label.check_id = \"pin-pedal-production-health-Bw6VSEb2fR0\"",
+        "comparison": "COMPARISON_LT",
+        "thresholdValue": 1,
+        "duration": "300s",
+        "aggregations": [
+          {
+            "alignmentPeriod": "300s",
+            "perSeriesAligner": "ALIGN_NEXT_OLDER"
+          }
+        ],
+        "trigger": { "count": 1 }
+      }
+    }
+  ]
+}

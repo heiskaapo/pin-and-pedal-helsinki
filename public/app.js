@@ -1,1183 +1,637 @@
-const $ = s => document.querySelector(s);
-const $$ = s => [...document.querySelectorAll(s)];
-const origin = [60.1699, 24.9384]; // Kamppi Depot, Helsinki (lat, lng)
+const $ = selector => document.querySelector(selector);
+const $$ = selector => [...document.querySelectorAll(selector)];
 
-// 5 Real Helsinki & Espoo Seed Bookings (Scheduled between 08:30 and 15:45)
-const initialSeed = [
-  {
-    id: 'H-1042',
-    address: 'Töölöntorinkatu 4, Töölö',
-    coords: [60.1782, 24.9248],
-    timeSlot: '08:30–09:15',
-    startMin: 510,
-    endMin: 555,
-    timed: true,
-    price: 39,
-    status: 'Completed',
-    contact: '+358 40 551 2291',
-    access: 'Key lock: Met customer outside bakery.'
-  },
-  {
-    id: 'H-1043',
-    address: 'Hämeentie 22, Kallio',
-    coords: [60.1856, 24.9567],
-    timeSlot: '10:15–11:00',
-    startMin: 615,
-    endMin: 660,
-    timed: true,
-    price: 39,
-    status: 'Completed',
-    contact: '+358 50 492 1104',
-    access: 'Key lock: Met by courtyard gate.'
-  },
-  {
-    id: 'H-1044',
-    address: 'Mannerheimintie 100, Meilahti',
-    coords: [60.1912, 24.9085],
-    timeSlot: '11:45–12:30',
-    startMin: 705,
-    endMin: 750,
-    timed: true,
-    price: 39,
-    status: 'En route',
-    contact: '+358 44 883 7120',
-    access: 'Number lock: 4821 - rack next to pharmacy.'
-  },
-  {
-    id: 'H-1045',
-    address: 'Otakaari 1, Otaniemi, Espoo',
-    coords: [60.1868, 24.8277],
-    timeSlot: '13:30–14:15',
-    startMin: 810,
-    endMin: 855,
-    timed: true,
-    price: 39,
-    status: 'Booked',
-    contact: '+358 45 619 4432',
-    access: 'Key lock: Meeting outside main building.'
-  },
-  {
-    id: 'H-1046',
-    address: 'Itämerenkatu 12, Ruoholahti',
-    coords: [60.1634, 24.9152],
-    timeSlot: '15:00–15:45',
-    startMin: 900,
-    endMin: 945,
-    timed: true,
-    price: 39,
-    status: 'Booked',
-    contact: '+358 40 339 8812',
-    access: 'Number lock: 0912 - metro station bike park.'
-  }
-];
-
-let jobs = JSON.parse(localStorage.getItem('pp_jobs') || 'null') || JSON.parse(JSON.stringify(initialSeed));
-let step = 1;
-let accessType = 'Meet in person';
-let pinSet = false;
-let quote = null;
-let bookingMap = null;
-let marker = null;
-let routeLayerGroup = null;
-let photos = {};
-let mapInitializing = false;
-
-let calculatedSlotsData = null;
-let selectedSlot = null;
-
-// Workday Constraints & Discretization (07:00 to 17:00 in 15-minute steps)
-const SLOTS_COUNT = 41;
-const WORKDAY_START = 420; // 07:00 in minutes from midnight
-const WORKDAY_END = 1020;  // 17:00 in minutes from midnight
-const REPAIR_DURATION = 30; // 30 minutes on-site repair
-
-const saveJobs = () => {
-  localStorage.setItem('pp_jobs', JSON.stringify(jobs));
-  renderOperatorDashboard();
+const state = {
+  config: null,
+  step: 1,
+  accessType: 'Meet in person',
+  coords: null,
+  quote: null,
+  selectedOption: null,
+  photos: {},
+  map: null,
+  customerMarker: null,
+  mechanicMarker: null,
+  routeLines: [],
+  live: null,
+  operator: null,
+  jobs: [],
+  locationWatchId: null
 };
 
-const toast = text => {
-  const el = $('#toast');
-  if (!el) return;
-  el.textContent = text;
-  el.classList.add('show');
-  clearTimeout(el._timer);
-  el._timer = setTimeout(() => el.classList.remove('show'), 2800);
-};
+function toast(message) {
+  const node = $('#toast');
+  node.textContent = message;
+  node.classList.add('show');
+  clearTimeout(node.timer);
+  node.timer = setTimeout(() => node.classList.remove('show'), 3500);
+}
 
-// Distance and travel time calculation
-const d = (a, b) => Math.hypot((a[0] - b[0]) * 111, (a[1] - b[1]) * 55);
-
-// Realistic cycling transit in Helsinki/Espoo (18 km/h + city stops)
-const travelTimeMinutes = (a, b) => {
-  const km = d(a, b);
-  return Math.max(3, Math.ceil(km * 3.4));
-};
-
-const minToTimeStr = m => {
-  const h = Math.floor(m / 60);
-  const min = m % 60;
-  return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
-};
-
-// Optimal Route Scheduling & Feasibility Engine (07:00–17:00)
-function evaluateAllSlots(customerCoords) {
-  const timedJobs = jobs
-    .filter(j => j.timed && j.coords && j.coords.length === 2)
-    .map(j => {
-      let [sH, sM] = (j.timeSlot.split('–')[0] || '09:00').split(':').map(Number);
-      let [eH, eM] = (j.timeSlot.split('–')[1] || '10:00').split(':').map(Number);
-      return {
-        id: j.id,
-        address: j.address,
-        coords: j.coords,
-        startMin: isNaN(sH) ? 540 : sH * 60 + sM,
-        endMin: isNaN(eH) ? 600 : eH * 60 + eM,
-        status: j.status
-      };
-    })
-    .sort((a, b) => a.startMin - b.startMin);
-
-  const routeStops = [
-    { id: 'DEPOT_START', address: 'Kamppi Hub (Depot)', coords: origin, startMin: WORKDAY_START, endMin: WORKDAY_START },
-    ...timedJobs,
-    { id: 'DEPOT_END', address: 'Kamppi Hub (Depot)', coords: origin, startMin: WORKDAY_END, endMin: WORKDAY_END }
-  ];
-
-  const slots = [];
-
-  for (let i = 0; i < SLOTS_COUNT; i++) {
-    const startMin = WORKDAY_START + i * 15;
-    const finishMin = startMin + REPAIR_DURATION;
-    const timeStr = minToTimeStr(startMin);
-    const slotLabel = `${timeStr}–${minToTimeStr(startMin + 45)}`;
-
-    if (startMin < WORKDAY_START || finishMin > WORKDAY_END) {
-      slots.push({ index: i, startMin, finishMin, timeStr, slotLabel, isFeasible: false, reason: 'Outside 07:00–17:00' });
-      continue;
-    }
-
-    const directOverlap = timedJobs.some(j => (startMin < j.endMin && finishMin > j.startMin));
-    if (directOverlap) {
-      slots.push({ index: i, startMin, finishMin, timeStr, slotLabel, isFeasible: false, reason: 'Mechanic busy with scheduled repair' });
-      continue;
-    }
-
-    let prevStop = routeStops[0];
-    let nextStop = routeStops[routeStops.length - 1];
-
-    for (let k = 0; k < routeStops.length; k++) {
-      if (routeStops[k].endMin <= startMin) {
-        prevStop = routeStops[k];
-      }
-      if (routeStops[k].startMin >= finishMin) {
-        nextStop = routeStops[k];
-        break;
-      }
-    }
-
-    const tPrevToCust = travelTimeMinutes(prevStop.coords, customerCoords);
-    const tCustToNext = travelTimeMinutes(customerCoords, nextStop.coords);
-    const tDirect = travelTimeMinutes(prevStop.coords, nextStop.coords);
-
-    const canArriveOnTime = (startMin >= prevStop.endMin + tPrevToCust);
-    const canReachNextOnTime = (finishMin + tCustToNext <= nextStop.startMin);
-
-    if (!canArriveOnTime || !canReachNextOnTime) {
-      slots.push({ index: i, startMin, finishMin, timeStr, slotLabel, isFeasible: false, reason: 'Transit route constraint' });
-      continue;
-    }
-
-    const detourMinutes = Math.max(1, tPrevToCust + tCustToNext - tDirect);
-    const travelSurcharge = Math.ceil(detourMinutes * 0.75);
-    const price = 29 + travelSurcharge;
-
-    slots.push({
-      index: i,
-      startMin,
-      finishMin,
-      timeStr,
-      slotLabel,
-      isFeasible: true,
-      prevStop,
-      nextStop,
-      detourMinutes,
-      travelSurcharge,
-      price
-    });
-  }
-
-  const feasibleSlots = slots.filter(s => s.isFeasible);
-  const minPrice = feasibleSlots.length ? Math.min(...feasibleSlots.map(s => s.price)) : 29;
-  const maxPrice = feasibleSlots.length ? Math.max(...feasibleSlots.map(s => s.price)) : 49;
-
-  slots.forEach(s => {
-    if (!s.isFeasible) {
-      s.color = '#c5cdc8';
-      s.tag = 'Unavailable';
-    } else if (s.price <= minPrice + 2) {
-      s.color = '#38b000';
-      s.tag = 'Best fit 🔥';
-    } else if (s.price <= minPrice + 6) {
-      s.color = '#f2ab43';
-      s.tag = 'Minor detour';
-    } else {
-      s.color = '#ff6647';
-      s.tag = 'Large detour';
-    }
+async function api(url, options = {}) {
+  const response = await fetch(url, {
+    credentials: 'same-origin',
+    ...options,
+    headers: options.body && !(options.body instanceof FormData)
+      ? { 'Content-Type': 'application/json', ...(options.headers || {}) }
+      : options.headers
   });
-
-  return { slots, feasibleSlots, minPrice, maxPrice, timedJobs };
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(payload.error || `Request failed (${response.status})`);
+    error.code = payload.code;
+    throw error;
+  }
+  return payload;
 }
 
-// Update Slider Track Gradient & Floating Bubble
-function updateSliderUI(slotsData, preferredIndex) {
-  const slider = $('#timeSlider');
-  if (!slider || !slotsData) return;
-
-  const gradientStops = slotsData.slots.map((s, idx) => {
-    const pct = ((idx / (SLOTS_COUNT - 1)) * 100).toFixed(1);
-    return `${s.color} ${pct}%`;
-  }).join(', ');
-
-  slider.style.background = `linear-gradient(90deg, ${gradientStops})`;
-  slider.disabled = false;
-
-  let targetIndex = preferredIndex !== undefined ? preferredIndex : +slider.value;
-  let chosen = slotsData.slots[targetIndex];
-
-  // If chosen slot is not feasible, automatically snap to the nearest feasible slot
-  if (!chosen || !chosen.isFeasible) {
-    if (slotsData.feasibleSlots.length) {
-      chosen = slotsData.feasibleSlots.reduce((prev, curr) =>
-        Math.abs(curr.index - targetIndex) < Math.abs(prev.index - targetIndex) ? curr : prev
-      );
-      slider.value = chosen.index;
-    }
-  }
-
-  selectedSlot = chosen;
-  renderSliderBubble(chosen);
+function showView(viewId) {
+  $$('.view').forEach(node => node.classList.toggle('active', node.id === viewId));
+  $$('.nav').forEach(node => node.classList.toggle('active', node.dataset.view === viewId));
+  if (viewId === 'ops') checkOperatorSession();
+  if (viewId === 'book' && state.step === 2) setTimeout(initMap, 50);
 }
 
-function renderSliderBubble(slot) {
-  const bubble = $('#sliderBubble');
-  const badge = $('#selectedSlotBadge');
-  const slider = $('#timeSlider');
-  if (!bubble || !slider) return;
-
-  if (!slot || !slot.isFeasible) {
-    bubble.style.display = 'none';
-    if (badge) {
-      badge.textContent = slot ? `${slot.timeStr} (Unavailable)` : 'Place pin first';
-      badge.className = 'slotBadge disabled';
-    }
-    return;
-  }
-
-  bubble.style.display = 'flex';
-  $('#bubblePrice').textContent = `€${slot.price}`;
-  $('#bubbleTime').textContent = slot.timeStr;
-  $('#bubbleTag').textContent = slot.tag;
-
-  const val = +slider.value;
-  const pct = (val / (SLOTS_COUNT - 1)) * 100;
-  bubble.style.left = `calc(${pct}% + ${(0.5 - pct / 100) * 24}px)`;
-
-  if (badge) {
-    badge.textContent = `${slot.slotLabel} · €${slot.price}`;
-    badge.className = 'slotBadge';
-  }
+function showStep(step) {
+  state.step = step;
+  $$('.bookStep').forEach(node => node.classList.toggle('active', Number(node.dataset.step) === step));
+  $$('.stepDots li').forEach((node, index) => node.classList.toggle('current', index === step - 1));
+  if (step === 2) setTimeout(initMap, 50);
+  if (step === 5) renderBookingSummary();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
-// Source: Google Maps Platform Code Assist
-let googleMap = null;
-let googleAdvancedMarkers = [];
-let googlePolylines = [];
-let googleGeocoder = null;
-let directionsService = null;
-
-// High-Resolution Helsinki & Espoo Cycling Street Coordinates
-const helsinkiBikingCorridor = [
-  // 1. Kamppi Depot to Töölöntorinkatu 4 (via Baana & Arkadiankatu cycleway)
-  [60.1699, 24.9384],
-  [60.1706, 24.9352],
-  [60.1718, 24.9312],
-  [60.1742, 24.9275],
-  [60.1765, 24.9255],
-  [60.1782, 24.9248], // Stop 1 (Töölöntorinkatu 4)
-
-  // 2. Töölöntorinkatu 4 to Hämeentie 22, Kallio (via Töölönlahti cycleway & Hakaniemi)
-  [60.1795, 24.9295],
-  [60.1812, 24.9365],
-  [60.1825, 24.9430],
-  [60.1838, 24.9510],
-  [60.1856, 24.9567], // Stop 2 (Hämeentie 22)
-
-  // 3. Hämeentie 22 to Mannerheimintie 100, Meilahti (via Sturenkatu & Nordenskiöldinkatu bike path)
-  [60.1882, 24.9520],
-  [60.1901, 24.9415],
-  [60.1910, 24.9280],
-  [60.1912, 24.9180],
-  [60.1912, 24.9085], // Stop 3 (Mannerheimintie 100)
-
-  // 4. Mannerheimintie 100 to Otakaari 1, Otaniemi (via Paciuksenkatu, Kuusisaari & Lehtisaari coastal bike bridge)
-  [60.1905, 24.8965],
-  [60.1880, 24.8810],
-  [60.1855, 24.8625],
-  [60.1830, 24.8465],
-  [60.1848, 24.8340],
-  [60.1868, 24.8277], // Stop 4 (Otakaari 1, Otaniemi)
-
-  // 5. Otakaari 1 to Itämerenkatu 12, Ruoholahti (via Keilaniemi, Lauttasaari bridge & Porkkalankatu)
-  [60.1785, 24.8315],
-  [60.1690, 24.8520],
-  [60.1635, 24.8760],
-  [60.1615, 24.8980],
-  [60.1634, 24.9152], // Stop 5 (Itämerenkatu 12)
-
-  // 6. Itämerenkatu 12 back to Kamppi Depot (via Ruoholahdenranta & Baana cycle tunnel)
-  [60.1648, 24.9240],
-  [60.1672, 24.9330],
-  [60.1699, 24.9384]  // Kamppi Hub (Depot return)
-];
-
-// Current Simulated Mechanic Position (En route near Stop 3 on Mannerheimintie)
-const currentMechanicPos = [60.1911, 24.9215];
-
-// Render Interactive Route Schedule Timeline Chips
-function renderRouteTimelineChips(chosenSlot) {
-  const container = $('#routeTimelineChips');
-  if (!container) return;
-
-  const timelineItems = [
-    { time: '07:00', title: 'Kamppi Hub', status: 'Departed', type: 'depot', coords: origin },
-    { time: '08:30', title: 'Stop 1 · Töölö', status: 'Completed ✅', type: 'completed', coords: [60.1782, 24.9248] },
-    { time: '10:15', title: 'Stop 2 · Kallio', status: 'Completed ✅', type: 'completed', coords: [60.1856, 24.9567] },
-    { time: '11:45', title: 'Stop 3 · Meilahti', status: 'En route 🚴', type: 'en-route', coords: [60.1912, 24.9085] },
-    { time: '13:30', title: 'Stop 4 · Otaniemi', status: 'Scheduled ⏳', type: 'booked', coords: [60.1868, 24.8277] },
-    { time: '15:00', title: 'Stop 5 · Ruoholahti', status: 'Scheduled ⏳', type: 'booked', coords: [60.1634, 24.9152] },
-    { time: '17:00', title: 'Kamppi Hub', status: 'Day Finish', type: 'depot', coords: origin }
-  ];
-
-  if (chosenSlot && chosenSlot.isFeasible) {
-    const custItem = {
-      time: chosenSlot.timeStr,
-      title: `Your Bike · €${chosenSlot.price}`,
-      status: chosenSlot.tag,
-      type: 'active',
-      coords: $('#coords').value.split(',').map(Number)
-    };
-    let idx = timelineItems.findIndex(x => x.time > chosenSlot.timeStr);
-    if (idx < 0) idx = timelineItems.length - 1;
-    timelineItems.splice(idx, 0, custItem);
-  }
-
-  container.innerHTML = timelineItems.map(item => `
-    <div class="timelineChip ${item.type}" data-lat="${item.coords[0]}" data-lng="${item.coords[1]}">
-      <span class="chipTime">${item.time}</span>
-      <span class="chipTitle">${item.title}</span>
-      <span class="chipStatus">${item.status}</span>
-    </div>
-  `).join('');
-
-  $$('.timelineChip').forEach(chip => {
-    chip.onclick = () => {
-      const lat = +chip.dataset.lat;
-      const lng = +chip.dataset.lng;
-      if (!isNaN(lat) && !isNaN(lng)) {
-        if (googleMap) {
-          googleMap.panTo({ lat, lng });
-          googleMap.setZoom(14);
-        } else if (bookingMap) {
-          bookingMap.flyTo([lat, lng], 14, { animate: true, duration: 1 });
-        }
-      }
-    };
-  });
-}
-
-// Live Map Route Polyline & Markers (Supports Google Maps Platform & Mapbox)
-function renderMapPlannedRoute(customerCoords, chosenSlot) {
-  renderRouteTimelineChips(chosenSlot);
-
-  // --- A. Google Maps Platform Rendering ---
-  if (googleMap && window.google && window.google.maps) {
-    // Clear previous Google markers & polylines
-    googleAdvancedMarkers.forEach(m => m.map = null);
-    googleAdvancedMarkers = [];
-    googlePolylines.forEach(p => p.setMap(null));
-    googlePolylines = [];
-
-    const activeJobs = jobs.filter(j => j.coords && j.coords.length === 2);
-
-    // 1. Kamppi Depot Marker
-    const depotDiv = document.createElement('div');
-    depotDiv.className = 'depot-marker';
-    depotDiv.innerHTML = '🏛️';
-    depotDiv.title = 'Kamppi Hub (07:00 start & 17:00 finish)';
-
-    if (google.maps.marker && google.maps.marker.AdvancedMarkerElement) {
-      const depotMarker = new google.maps.marker.AdvancedMarkerElement({
-        map: googleMap,
-        position: { lat: origin[0], lng: origin[1] },
-        title: 'Kamppi Hub',
-        content: depotDiv
-      });
-      googleAdvancedMarkers.push(depotMarker);
-    }
-
-    // 2. Active Scheduled Stops 1..5 with time badges
-    activeJobs.forEach((j, i) => {
-      const stopDiv = document.createElement('div');
-      stopDiv.className = 'stop-number-marker';
-      const timeShort = j.timeSlot.split('–')[0] || '';
-      stopDiv.innerHTML = `<span>#${i + 1}</span><small style="font-size:9px;opacity:0.9;">${timeShort}</small>`;
-      stopDiv.title = `Stop ${i + 1}: ${j.address} (${j.timeSlot}) · Status: ${j.status}`;
-
-      if (google.maps.marker && google.maps.marker.AdvancedMarkerElement) {
-        const stopMarker = new google.maps.marker.AdvancedMarkerElement({
-          map: googleMap,
-          position: { lat: j.coords[0], lng: j.coords[1] },
-          title: `Stop ${i + 1}: ${j.address}`,
-          content: stopDiv
-        });
-        googleAdvancedMarkers.push(stopMarker);
-      }
-    });
-
-    // 3. Live Mechanic Pulse Marker (Current real-time location on bike path)
-    const mechDiv = document.createElement('div');
-    mechDiv.className = 'mechanic-pulse-marker';
-    mechDiv.innerHTML = '🚴';
-    mechDiv.title = 'Live Mechanic: Juho (En route on Mannerheimintie, next stop 11:45)';
-
-    if (google.maps.marker && google.maps.marker.AdvancedMarkerElement) {
-      const mechMarker = new google.maps.marker.AdvancedMarkerElement({
-        map: googleMap,
-        position: { lat: currentMechanicPos[0], lng: currentMechanicPos[1] },
-        title: '🚴 Mechanic Juho is en route to Mannerheimintie (ETA 11:45)',
-        content: mechDiv
-      });
-      googleAdvancedMarkers.push(mechMarker);
-    }
-
-    // 4. Customer Marker
-    if (customerCoords) {
-      const pinDiv = document.createElement('div');
-      pinDiv.className = 'custom-pin-marker';
-      pinDiv.innerHTML = '<div style="background:#ff6647;width:26px;height:26px;border-radius:50%;border:3px solid #fff;box-shadow:0 3px 12px rgba(255,102,71,0.6);display:flex;align-items:center;justify-content:center;color:#fff;font-size:13px;position:relative;">📍<div style="position:absolute;bottom:-7px;left:10px;width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:7px solid #ff6647;"></div></div>';
-      pinDiv.title = 'Your Bike Location';
-
-      if (google.maps.marker && google.maps.marker.AdvancedMarkerElement) {
-        const custMarker = new google.maps.marker.AdvancedMarkerElement({
-          map: googleMap,
-          position: { lat: customerCoords[0], lng: customerCoords[1] },
-          title: '📍 Your Bike Location',
-          content: pinDiv
-        });
-        googleAdvancedMarkers.push(custMarker);
-      }
-    }
-
-    // 5. Draw Cycling Route Polylines on Helsinki Bike Paths
-    const googleBikingPath = helsinkiBikingCorridor.map(pt => ({ lat: pt[0], lng: pt[1] }));
-
-    const basePolyline = new google.maps.Polyline({
-      path: googleBikingPath,
-      geodesic: true,
-      strokeColor: '#2b7336',
-      strokeOpacity: 0.85,
-      strokeWeight: 4.5,
-      map: googleMap
-    });
-    googlePolylines.push(basePolyline);
-
-    // Customer Cycling Detour Leg
-    if (customerCoords && chosenSlot && chosenSlot.isFeasible && chosenSlot.prevStop && chosenSlot.nextStop) {
-      const detourPath = [
-        { lat: chosenSlot.prevStop.coords[0], lng: chosenSlot.prevStop.coords[1] },
-        { lat: customerCoords[0], lng: customerCoords[1] },
-        { lat: chosenSlot.nextStop.coords[0], lng: chosenSlot.nextStop.coords[1] }
-      ];
-
-      const detourPolyline = new google.maps.Polyline({
-        path: detourPath,
-        geodesic: true,
-        strokeColor: '#ff6647',
-        strokeOpacity: 0.95,
-        strokeWeight: 5.5,
-        map: googleMap
-      });
-      googlePolylines.push(detourPolyline);
-    }
-    return;
-  }
-
-  // --- B. Leaflet / Mapbox Rendering Fallback ---
-  if (!bookingMap) return;
-
-  if (!routeLayerGroup) {
-    routeLayerGroup = L.layerGroup().addTo(bookingMap);
-  } else {
-    routeLayerGroup.clearLayers();
-  }
-
-  // 1. Kamppi Depot Base
-  const depotIcon = L.divIcon({
-    className: 'depot-marker',
-    html: '🏛️',
-    iconSize: [28, 28],
-    iconAnchor: [14, 14]
-  });
-  L.marker(origin, { icon: depotIcon })
-    .bindPopup('<strong>🏛️ Kamppi Hub (Depot)</strong><br>07:00 mechanic dispatch & 17:00 return')
-    .addTo(routeLayerGroup);
-
-  // 2. Active Seed Bookings (1..5)
-  const activeJobs = jobs.filter(j => j.coords && j.coords.length === 2);
-  activeJobs.forEach((j, i) => {
-    const timeShort = j.timeSlot.split('–')[0] || '';
-    const stopNumIcon = L.divIcon({
-      className: 'stop-number-marker',
-      html: `<span>#${i + 1}</span><small style="font-size:9px;">${timeShort}</small>`,
-      iconSize: [40, 24],
-      iconAnchor: [20, 12]
-    });
-    L.marker(j.coords, { icon: stopNumIcon })
-      .bindPopup(`<strong>Stop ${i + 1}: ${j.address}</strong><br>Time: ${j.timeSlot}<br>Status: ${j.status}`)
-      .addTo(routeLayerGroup);
-  });
-
-  // 3. Live Mechanic Pulse Marker on Leaflet
-  const mechIcon = L.divIcon({
-    className: 'mechanic-pulse-marker',
-    html: '🚴',
-    iconSize: [32, 32],
-    iconAnchor: [16, 16]
-  });
-  L.marker(currentMechanicPos, { icon: mechIcon })
-    .bindPopup('<strong>🚴 Mechanic En Route</strong><br>Juho is on Mannerheimintie heading to Stop 3 (ETA 11:45)')
-    .addTo(routeLayerGroup);
-
-  // 4. Customer Marker
-  if (customerCoords) {
-    const pinIcon = L.divIcon({
-      className: 'custom-pin-marker',
-      html: '<div style="background:#ff6647;width:24px;height:24px;border-radius:50%;border:3px solid #fff;box-shadow:0 3px 10px rgba(255,102,71,0.5);position:relative;"><div style="position:absolute;bottom:-7px;left:9px;width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:7px solid #ff6647;"></div></div>',
-      iconSize: [24, 31],
-      iconAnchor: [12, 31]
-    });
-    const priceText = chosenSlot && chosenSlot.isFeasible ? ` · €${chosenSlot.price}` : '';
-    const slotText = chosenSlot && chosenSlot.isFeasible ? chosenSlot.timeStr : 'Pinned location';
-    L.marker(customerCoords, { icon: pinIcon })
-      .bindPopup(`<strong>📍 Your Bike Location</strong><br>Time: ${slotText}${priceText}`)
-      .addTo(routeLayerGroup);
-  }
-
-  // 5. Draw Cycling Route on Helsinki Bike Corridor
-  L.polyline(helsinkiBikingCorridor, {
-    color: '#2b7336',
-    weight: 4.5,
-    opacity: 0.85,
-    lineCap: 'round',
-    lineJoin: 'round'
-  }).addTo(routeLayerGroup);
-
-  if (customerCoords && chosenSlot && chosenSlot.isFeasible && chosenSlot.prevStop && chosenSlot.nextStop) {
-    L.polyline([chosenSlot.prevStop.coords, customerCoords, chosenSlot.nextStop.coords], {
-      color: '#ff6647',
-      weight: 5.5,
-      opacity: 0.95,
-      lineCap: 'round',
-      lineJoin: 'round'
-    }).addTo(routeLayerGroup);
-  }
-}
-
-// Calculate and Update Quotes & Form Steps
-async function calculate() {
-  if (!pinSet) return;
-  const rawCoords = $('#coords').value;
-  if (!rawCoords) return;
-  const p = rawCoords.split(',').map(Number);
-  if (p.some(isNaN)) return;
-
-  calculatedSlotsData = evaluateAllSlots(p);
-
-  let targetSlot = null;
-  if (accessType === 'Meet in person') {
-    updateSliderUI(calculatedSlotsData, +$('#timeSlider').value || 16);
-    targetSlot = selectedSlot;
-  } else {
-    // Number Lock Flexible: Pick global best fit / lowest cost
-    targetSlot = calculatedSlotsData.feasibleSlots.reduce((min, s) => s.price < min.price ? s : min, calculatedSlotsData.feasibleSlots[0]);
-    selectedSlot = targetSlot;
-    $('#selectedSlotBadge').textContent = `Flexible gap: ${targetSlot.timeStr} (Lowest price)`;
-    $('#selectedSlotBadge').className = 'slotBadge';
-    $('#timeSlider').disabled = true;
-    $('#sliderBubble').style.display = 'none';
-  }
-
-  if (!targetSlot) return;
-
-  const price = targetSlot.price;
-  const isFlex = accessType === 'Lock code';
-  const slot = isFlex ? `Flexible gap · ${targetSlot.slotLabel}` : targetSlot.slotLabel;
-  const added = targetSlot.detourMinutes || 2;
-  const travel = targetSlot.travelSurcharge || 2;
-
-  quote = { price, slot, added };
-
-  const detail = `Adds ~${added} travel min from active route. €29 base repair + €${travel} travel surcharge.`;
-  const quoteEl = $('#quoteTitle');
-  if (quoteEl) {
-    quoteEl.textContent = accessType === 'Meet in person'
-      ? `Appointment ${slot} · €${price}`
-      : `Flexible repair · €${price}`;
-  }
-  if ($('#quoteBody')) $('#quoteBody').textContent = detail;
-  if ($('#quotePrice')) $('#quotePrice').textContent = `€${price}`;
-  if ($('#priceState')) $('#priceState').textContent = slot;
-  if ($('#priceLarge')) $('#priceLarge').textContent = `€${price}`;
-  if ($('#priceDetail')) $('#priceDetail').textContent = detail;
-  if ($('#paymentPrice')) $('#paymentPrice').textContent = `€${price}`;
-  if ($('#paymentSummary')) $('#paymentSummary').textContent = `${slot} · optimal route pricing`;
-  if ($('#checkout')) $('#checkout').innerHTML = `Pay €${price} & book repair <span>→</span>`;
-
-  renderMapPlannedRoute(p, targetSlot);
-}
-
-// Map Initialization
-function triggerMapResize() {
-  if (bookingMap && typeof bookingMap.invalidateSize === 'function') {
-    bookingMap.invalidateSize();
-  }
-  if (googleMap && window.google && window.google.maps) {
-    google.maps.event.trigger(googleMap, 'resize');
-  }
-}
-
-async function initOrResizeMap() {
-  const mapContainer = $('#map');
-  if (!mapContainer) return;
-
-  if (bookingMap || googleMap) {
-    triggerMapResize();
-    return;
-  }
-  if (mapInitializing) return;
-  mapInitializing = true;
-
-  let config = {};
-  try {
-    config = await fetch('/api/config').then(r => r.json());
-  } catch {}
-
-  const gmapsKey = config.googleMapsApiKey || '';
-  const mapboxToken = config.mapboxPublicToken || '';
-
-  // 1. Google Maps Platform Initializer
-  if (gmapsKey || window.google?.maps) {
-    try {
-      if (!window.google || !window.google.maps) {
-        await new Promise((resolve, reject) => {
-          const script = document.createElement('script');
-          script.src = `https://maps.googleapis.com/maps/api/js?key=${gmapsKey}&v=weekly&libraries=marker,places,geometry`;
-          script.async = true;
-          script.defer = true;
-          script.onload = resolve;
-          script.onerror = reject;
-          document.head.appendChild(script);
-        });
-      }
-
-      googleMap = new google.maps.Map(mapContainer, {
-        center: { lat: 60.178, lng: 24.920 },
-        zoom: 12,
-        mapId: 'DEMO_MAP_ID',
-        internalUsageAttributionIds: ['gmp_git_agentskills_v1'],
-        mapTypeControl: false,
-        fullscreenControl: false,
-        streetViewControl: false
-      });
-
-      googleGeocoder = new google.maps.Geocoder();
-
-      googleMap.addListener('click', e => {
-        if (!e.latLng) return;
-        setPinLocation(e.latLng.lat(), e.latLng.lng());
-      });
-
-      $('#pinStatus').textContent = 'Tap anywhere on Google Maps to place your bike pin.';
-      renderMapPlannedRoute(null, null);
-      mapInitializing = false;
-      return;
-    } catch (err) {
-      console.warn('Google Maps load fallback to Leaflet:', err);
-    }
-  }
-
-  // 2. Leaflet Fallback Provider
-  try {
-    // Dynamically load Leaflet assets if not already on page
-    if (!window.L) {
-      const link = document.createElement('link');
-      link.rel = 'stylesheet';
-      link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
-      document.head.appendChild(link);
-
-      await new Promise(resolve => {
-        const script = document.createElement('script');
-        script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
-        script.onload = resolve;
-        document.head.appendChild(script);
-      });
-    }
-
-    bookingMap = L.map('map', {
-      center: [60.178, 24.920], // Center over Helsinki/Espoo service corridor
-      zoom: 12,
-      zoomControl: true,
-      fadeAnimation: true,
-      zoomAnimation: true
-    });
-
-    const mapboxTileUrl = `https://api.mapbox.com/styles/v1/mapbox/streets-v12/tiles/512/{z}/{x}/{y}@2x?access_token=${mapboxToken}`;
-    const cartoTileUrl = 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png';
-
-    const tiles = L.tileLayer(mapboxToken ? mapboxTileUrl : cartoTileUrl, {
-      maxZoom: 19,
-      tileSize: mapboxToken ? 512 : 256,
-      zoomOffset: mapboxToken ? -1 : 0,
-      attribution: '© <a href="https://www.mapbox.com/about/maps/">Mapbox</a> © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-    }).addTo(bookingMap);
-
-    tiles.on('tileerror', () => {
-      L.tileLayer(cartoTileUrl, {
-        maxZoom: 19,
-        subdomains: 'abcd',
-        attribution: '© CARTO © OpenStreetMap'
-      }).addTo(bookingMap);
-    });
-
-    $('#pinStatus').textContent = 'Tap anywhere on the map to place your bike pin.';
-    [50, 150, 300, 600].forEach(ms => setTimeout(triggerMapResize, ms));
-
-    // Render baseline seed route on load
-    renderMapPlannedRoute(null, null);
-
-    if (pinSet && $('#coords').value) {
-      const [lat, lng] = $('#coords').value.split(',').map(Number);
-      if (!isNaN(lat) && !isNaN(lng)) {
-        setPinLocation(lat, lng);
-      }
-    }
-
-    bookingMap.on('click', e => {
-      const { lat, lng } = e.latlng;
-      if (isNaN(lat) || isNaN(lng)) return;
-      setPinLocation(lat, lng);
-    });
-  } catch (err) {
-    console.error('Map initialization error:', err);
-    $('#pinStatus').textContent = 'Tap to select location or refresh.';
-  } finally {
-    mapInitializing = false;
-  }
-}
-
-function setPinLocation(lat, lng) {
-  $('#coords').value = `${lat.toFixed(6)},${lng.toFixed(6)}`;
-  pinSet = true;
-  $('#pinStatus').textContent = `✓ Pin placed at ${lat.toFixed(4)}, ${lng.toFixed(4)} — route schedule & pricing calculated.`;
-  $('#pinStatus').classList.add('ready');
-
-  // If Google Geocoder is available, reverse-geocode location name
-  if (googleGeocoder && window.google && window.google.maps) {
-    googleGeocoder.geocode({ location: { lat, lng } }, (results, status) => {
-      if (status === 'OK' && results && results[0]) {
-        const shortAddress = results[0].formatted_address.split(',')[0];
-        $('#pinStatus').textContent = `✓ Pin placed at ${shortAddress} (${lat.toFixed(4)}, ${lng.toFixed(4)})`;
-      }
-    });
-  }
-
-  calculate();
-}
-
-// Mobile-First GPS Geolocation
-$('#locateMeBtn')?.addEventListener('click', () => {
-  if (!navigator.geolocation) {
-    toast('Geolocation is not supported by your browser.');
-    return;
-  }
-  toast('Locating your position via GPS…');
-  navigator.geolocation.getCurrentPosition(
-    pos => {
-      const lat = pos.coords.latitude;
-      const lng = pos.coords.longitude;
-      if (googleMap) {
-        googleMap.panTo({ lat, lng });
-        googleMap.setZoom(14);
-      } else if (bookingMap) {
-        bookingMap.flyTo([lat, lng], 14, { animate: true, duration: 1 });
-      }
-      setPinLocation(lat, lng);
-      toast('✓ Location pinned successfully!');
-    },
-    err => {
-      toast('Could not access GPS. Please tap your location on the map.');
-    },
-    { enableHighAccuracy: true, timeout: 10000 }
-  );
-});
-
-// Form Fullscreen Expansion
-function expandForm() {
-  const hero = $('#heroContainer');
-  if (hero && !hero.classList.contains('expanded')) {
-    hero.classList.add('expanded');
-    [60, 150, 350].forEach(ms => setTimeout(triggerMapResize, ms));
-  }
-}
-
-function collapseForm() {
-  const hero = $('#heroContainer');
-  if (hero && hero.classList.contains('expanded')) {
-    hero.classList.remove('expanded');
-    [60, 150, 350].forEach(ms => setTimeout(triggerMapResize, ms));
-  }
-}
-
-// Step Navigation & Validation
-function showStep(n) {
-  step = n;
-  $$('.bookStep').forEach(x => x.classList.toggle('active', +x.dataset.step === n));
-  $$('.stepDots b').forEach((x, i) => x.classList.toggle('current', i === n - 1));
-
-  if (n > 1) {
-    expandForm();
-  }
-
-  if (n === 2) {
-    initOrResizeMap();
-    [50, 150, 300, 500].forEach(ms => setTimeout(triggerMapResize, ms));
-  }
-}
-
-function validStep() {
-  if (step === 2 && !pinSet) {
-    toast('Please place your bike pin on the map first.');
-    return false;
-  }
-  if (step === 3 && !quote) {
-    toast('Calculating your route price…');
-    return false;
-  }
+function validateStep(step) {
+  if (step === 3 && !state.selectedOption) throw new Error('Choose an available appointment.');
   if (step === 4) {
-    const requiredFields = ['access', 'phone'];
-    const missingField = requiredFields.some(id => !$('#' + id).value.trim());
-    const missingPhotos = !photos['scenePhoto'] || !photos['framePhoto'] || !photos['tirePhoto'];
-    if (missingField || missingPhotos) {
-      toast('Please upload all 3 photos and fill in your contact details.');
-      return false;
-    }
+    if (!state.photos.scene || !state.photos.frame || !state.photos.tire) throw new Error('Add all three identification photos.');
+    if (!$('#accessInstructions').value.trim() || !$('#phone').value.trim()) throw new Error('Access instructions and phone number are required.');
+    if ($('#email').value && !$('#email').validity.valid) throw new Error('Enter a valid email address.');
   }
-  return true;
 }
 
-// Event Listeners for Booking Flow
-$$('.next').forEach(b => {
-  b.onclick = () => {
-    expandForm();
-    if (validStep()) {
-      showStep(Math.min(5, step + 1));
-    }
-  };
-});
-
-$$('.back').forEach(b => {
-  b.onclick = () => showStep(Math.max(1, step - 1));
-});
-
-$('#bookingCard')?.addEventListener('click', () => {
-  expandForm();
-});
-
-// Slider Event Listeners (Real-time live price and map route update)
-const timeSlider = $('#timeSlider');
-if (timeSlider) {
-  timeSlider.addEventListener('input', e => {
-    if (!calculatedSlotsData) return;
-    const idx = +e.target.value;
-    const slot = calculatedSlotsData.slots[idx];
-    if (slot) {
-      selectedSlot = slot;
-      renderSliderBubble(slot);
-      if (slot.isFeasible) {
-        quote = { price: slot.price, slot: slot.slotLabel, added: slot.detourMinutes };
-        $('#priceLarge').textContent = `€${slot.price}`;
-        $('#priceState').textContent = slot.slotLabel;
-        $('#paymentPrice').textContent = `€${slot.price}`;
-        $('#paymentSummary').textContent = `${slot.slotLabel} · optimal route pricing`;
-        const rawCoords = $('#coords').value.split(',').map(Number);
-        renderMapPlannedRoute(rawCoords, slot);
-      }
-    }
-  });
-
-  timeSlider.addEventListener('change', e => {
-    calculate();
+function loadGoogleMaps() {
+  if (window.google?.maps) return Promise.resolve();
+  if (!state.config?.mapsBrowserApiKey) return Promise.reject(new Error('Google Maps is not configured.'));
+  return new Promise((resolve, reject) => {
+    window.__pinPedalMapsReady = resolve;
+    const script = document.createElement('script');
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(state.config.mapsBrowserApiKey)}&libraries=geometry&loading=async&callback=__pinPedalMapsReady`;
+    script.async = true;
+    script.onerror = () => reject(new Error('Google Maps could not load.'));
+    document.head.appendChild(script);
   });
 }
 
-$('#accessType').onclick = e => {
-  expandForm();
-  const b = e.target.closest('button');
-  if (!b) return;
-  $$('#accessType button').forEach(x => x.classList.remove('selected'));
-  b.classList.add('selected');
-  accessType = b.dataset.value;
-
-  const isFlex = accessType === 'Lock code';
-  $('#slotSection').style.display = isFlex ? 'none' : 'block';
-  $('#accessLabel').childNodes[0].textContent = isFlex ? 'Number-lock code and access details' : 'When can we meet?';
-  $('#access').placeholder = isFlex ? 'Enter number-lock code and specific access instructions' : 'Tell us when you will be at the bike location';
-
-  if (pinSet) {
-    calculate();
+async function initMap() {
+  if (state.map) {
+    google.maps.event.trigger(state.map, 'resize');
+    return;
   }
-};
-
-// File Upload Handlers with visual label feedback
-[
-  ['scenePhoto', 'sceneName', '✓ Surroundings photo attached'],
-  ['framePhoto', 'frameName', '✓ Frame photo attached'],
-  ['tirePhoto', 'tireName', '✓ Tire markings photo attached']
-].forEach(([inputId, labelId, successMsg]) => {
-  const input = $('#' + inputId);
-  if (!input) return;
-  input.onchange = e => {
-    const file = e.target.files[0];
-    if (file) {
-      const r = new FileReader();
-      r.onload = () => {
-        photos[inputId] = r.result;
-        $('#' + labelId).textContent = successMsg;
-        $('#' + labelId).style.color = '#2b7336';
-      };
-      r.readAsDataURL(file);
-    }
-  };
-});
-
-// Booking Submission
-$('#bookingForm').onsubmit = async e => {
-  e.preventDefault();
-  if (!quote) return;
-
-  const rawCoords = $('#coords').value.split(',').map(Number);
-  const newJob = {
-    id: 'H-' + Math.floor(1000 + Math.random() * 8999),
-    address: 'Pinned Helsinki location',
-    coords: rawCoords,
-    timeSlot: quote.slot,
-    timed: accessType === 'Meet in person',
-    price: quote.price,
-    status: 'Booked',
-    contact: $('#phone').value.trim(),
-    access: `${accessType}: ${$('#access').value.trim()}`,
-    ...photos
-  };
-
-  jobs.push(newJob);
-  saveJobs();
-
-  let pay = { demo: true };
   try {
-    pay = await fetch('/api/checkout', {
+    await loadGoogleMaps();
+    state.map = new google.maps.Map($('#map'), {
+      center: { lat: 60.18, lng: 24.90 },
+      zoom: 11,
+      mapTypeControl: false,
+      streetViewControl: false,
+      fullscreenControl: false
+    });
+    new google.maps.Marker({
+      map: state.map,
+      position: { lat: state.config.depot.coords[0], lng: state.config.depot.coords[1] },
+      title: state.config.depot.address,
+      label: 'D'
+    });
+    state.map.addListener('click', event => setPin(event.latLng.lat(), event.latLng.lng()));
+    $('#pinStatus').textContent = 'Tap the map or use GPS to place the bike pin.';
+    renderLiveState();
+  } catch (error) {
+    $('#pinStatus').textContent = error.message;
+  }
+}
+
+function withinServiceArea(lat, lng) {
+  const area = state.config.serviceArea;
+  return lat >= area.minLat && lat <= area.maxLat && lng >= area.minLng && lng <= area.maxLng;
+}
+
+function setPin(lat, lng) {
+  if (!withinServiceArea(lat, lng)) {
+    toast('That pin is outside the Helsinki and Espoo service area.');
+    return;
+  }
+  state.coords = [Number(lat.toFixed(6)), Number(lng.toFixed(6))];
+  $('#coords').value = state.coords.join(',');
+  if (!state.customerMarker) state.customerMarker = new google.maps.Marker({ map: state.map, title: 'Bike location' });
+  state.customerMarker.setPosition({ lat, lng });
+  $('#pinStatus').textContent = `Bike pin: ${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+  $('#findSlotsBtn').disabled = false;
+  state.quote = null;
+  state.selectedOption = null;
+}
+
+function clearRouteLines() {
+  state.routeLines.forEach(line => line.setMap(null));
+  state.routeLines = [];
+}
+
+function drawOptionRoute(option) {
+  if (!state.map || !window.google?.maps?.geometry) return;
+  clearRouteLines();
+  for (const encoded of option.routePolylines || []) {
+    const line = new google.maps.Polyline({
+      map: state.map,
+      path: google.maps.geometry.encoding.decodePath(encoded),
+      strokeColor: '#f76545',
+      strokeOpacity: 0.9,
+      strokeWeight: 5
+    });
+    state.routeLines.push(line);
+  }
+}
+
+async function findAppointments() {
+  if (!state.coords) return;
+  const button = $('#findSlotsBtn');
+  button.disabled = true;
+  button.textContent = 'Calculating real cycling routes…';
+  try {
+    const quote = await api('/api/quotes', {
+      method: 'POST',
+      body: JSON.stringify({ customerCoords: state.coords, accessType: state.accessType })
+    });
+    state.quote = quote;
+    renderSlotOptions();
+    showStep(3);
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+    button.innerHTML = 'Find real appointments <span>→</span>';
+  }
+}
+
+function renderSlotOptions() {
+  const container = $('#slotOptions');
+  container.replaceChildren();
+  state.selectedOption = null;
+  const recommendedId = state.quote.recommendation?.recommendedOptionId;
+  if (state.quote.recommendation?.reason) {
+    $('#aiRecommendation').hidden = false;
+    $('#aiRecommendation').textContent = `Route assistant: ${state.quote.recommendation.reason}`;
+  } else $('#aiRecommendation').hidden = true;
+
+  state.quote.options.forEach(option => {
+    const label = document.createElement('label');
+    label.className = 'slotOption';
+    const main = document.createElement('span');
+    main.className = 'slotMain';
+    const radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.name = 'slot';
+    radio.value = option.id;
+    const text = document.createElement('span');
+    const strong = document.createElement('strong');
+    strong.textContent = option.label + (recommendedId === option.id ? ' · Recommended' : '');
+    const detail = document.createElement('small');
+    detail.textContent = `+${option.detourKm} km · +${option.detourMinutes} min cycling detour`;
+    text.append(strong, detail);
+    main.append(radio, text);
+    const price = document.createElement('strong');
+    price.className = 'slotPrice';
+    price.textContent = `€${option.price}`;
+    label.append(main, price);
+    label.addEventListener('click', () => selectOption(option, label, radio));
+    container.append(label);
+  });
+}
+
+function selectOption(option, label, radio) {
+  state.selectedOption = option;
+  $$('.slotOption').forEach(node => node.classList.remove('selected'));
+  label.classList.add('selected');
+  radio.checked = true;
+  $('#routeImpact').hidden = false;
+  $('#impactKm').textContent = `+${option.detourKm} km`;
+  $('#impactMinutes').textContent = `+${option.detourMinutes} min`;
+  $('#impactPrice').textContent = `€${option.price}`;
+  drawOptionRoute(option);
+}
+
+function loadImage(file) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    const url = URL.createObjectURL(file);
+    image.onload = () => { URL.revokeObjectURL(url); resolve(image); };
+    image.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Photo could not be read.')); };
+    image.src = url;
+  });
+}
+
+async function compressPhoto(file) {
+  if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) throw new Error('Use a JPEG, PNG, or WebP photo.');
+  const image = await loadImage(file);
+  const maxDimension = 1600;
+  const scale = Math.min(1, maxDimension / Math.max(image.naturalWidth, image.naturalHeight));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+  canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
+  const data = canvas.toDataURL('image/jpeg', 0.82);
+  if (Math.ceil(data.length * 0.75) > 4 * 1024 * 1024) throw new Error('The compressed photo is still larger than 4 MB.');
+  return data;
+}
+
+function renderBookingSummary() {
+  const container = $('#bookingSummary');
+  container.replaceChildren();
+  const rows = [
+    ['Appointment', state.selectedOption?.label || '—'],
+    ['Bike access', state.accessType],
+    ['Cycling detour', `+${state.selectedOption?.detourKm ?? '—'} km`],
+    ['Total', `€${state.selectedOption?.price ?? '—'}`]
+  ];
+  rows.forEach(([name, value], index) => {
+    const row = document.createElement('div');
+    row.className = `summaryRow${index === rows.length - 1 ? ' total' : ''}`;
+    const label = document.createElement('span');
+    label.textContent = name;
+    const result = document.createElement('strong');
+    result.textContent = value;
+    row.append(label, result);
+    container.append(row);
+  });
+  $('#checkoutBtn').disabled = !state.config.paymentsConfigured;
+}
+
+async function submitBooking(event) {
+  event.preventDefault();
+  try { validateStep(4); } catch (error) { toast(error.message); return; }
+  if (!state.quote || !state.selectedOption) return toast('Request a fresh appointment quote.');
+  const button = $('#checkoutBtn');
+  button.disabled = true;
+  button.textContent = 'Creating secure checkout…';
+  try {
+    const result = await api('/api/bookings', {
+      method: 'POST',
+      body: JSON.stringify({
+        quoteToken: state.quote.quoteToken,
+        optionId: state.selectedOption.id,
+        phone: $('#phone').value.trim(),
+        email: $('#email').value.trim(),
+        accessType: state.accessType,
+        accessInstructions: $('#accessInstructions').value.trim(),
+        photos: [
+          { kind: 'scene', data: state.photos.scene },
+          { kind: 'frame', data: state.photos.frame },
+          { kind: 'tire', data: state.photos.tire }
+        ]
+      })
+    });
+    localStorage.setItem('pp_customer_booking_token', result.customerBookingToken);
+    location.assign(result.checkoutUrl);
+  } catch (error) {
+    toast(error.message);
+    button.disabled = !state.config.paymentsConfigured;
+    button.innerHTML = 'Continue to Stripe <span>→</span>';
+  }
+}
+
+async function refreshBookingResult() {
+  const params = new URLSearchParams(location.search);
+  const payment = params.get('payment');
+  if (!payment) return;
+  const banner = $('#paymentResult');
+  banner.hidden = false;
+  const token = localStorage.getItem('pp_customer_booking_token');
+  if (payment === 'cancel') {
+    try {
+      if (token) await api('/api/bookings/cancel', { method: 'POST', body: JSON.stringify({ token }) });
+      banner.className = 'resultBanner error';
+      banner.textContent = 'Payment was cancelled. The unconfirmed appointment has been released.';
+    } catch (error) {
+      banner.className = 'resultBanner error';
+      banner.textContent = `Payment was cancelled, but the appointment could not be released automatically: ${error.message}`;
+    }
+  } else if (token) {
+    try {
+      const booking = await api(`/api/bookings/status?token=${encodeURIComponent(token)}`);
+      banner.className = booking.paymentStatus === 'paid' ? 'resultBanner success' : 'resultBanner';
+      banner.textContent = booking.paymentStatus === 'paid'
+        ? `Booking ${booking.id} is confirmed for ${booking.timeSlot}.`
+        : 'Stripe returned successfully. Payment confirmation is still being verified by the webhook.';
+      if (booking.paymentStatus === 'paid' && booking.status !== 'Cancelled') {
+        const cancelButton = document.createElement('button');
+        cancelButton.type = 'button';
+        cancelButton.className = 'quiet compact';
+        cancelButton.textContent = 'Cancel and refund';
+        cancelButton.addEventListener('click', async () => {
+          cancelButton.disabled = true;
+          try {
+            const result = await api('/api/bookings/cancel', { method: 'POST', body: JSON.stringify({ token }) });
+            banner.className = 'resultBanner success';
+            banner.textContent = result.booking.paymentStatus === 'refunded'
+              ? 'The booking was cancelled and the refund was submitted to Stripe.'
+              : 'The booking was cancelled.';
+          } catch (error) {
+            toast(error.message);
+            cancelButton.disabled = false;
+          }
+        });
+        banner.append(document.createElement('br'), cancelButton);
+      }
+    } catch (error) {
+      banner.className = 'resultBanner error';
+      banner.textContent = error.message;
+    }
+  }
+  history.replaceState({}, '', location.pathname);
+}
+
+async function pollLive() {
+  try {
+    state.live = await api('/api/public/live');
+    renderLiveState();
+  } catch {}
+}
+
+function renderLiveState() {
+  const mechanic = state.live?.mechanic;
+  const statusNode = $('#liveStatus');
+  const dot = $('.liveDot');
+  if (!mechanic) {
+    statusNode.textContent = 'No recent mechanic GPS update is available.';
+    dot.classList.remove('fresh');
+    return;
+  }
+  const ageMinutes = Math.round((Date.now() - new Date(mechanic.updatedAt).getTime()) / 60000);
+  const fresh = ageMinutes <= 5;
+  dot.classList.toggle('fresh', fresh);
+  statusNode.textContent = fresh ? `Live GPS updated ${Math.max(0, ageMinutes)} minute(s) ago.` : `Last verified GPS update was ${ageMinutes} minutes ago.`;
+  if (state.map) {
+    const position = { lat: mechanic.coords[0], lng: mechanic.coords[1] };
+    if (!state.mechanicMarker) state.mechanicMarker = new google.maps.Marker({ map: state.map, title: 'Mechanic live GPS', label: 'M' });
+    state.mechanicMarker.setPosition(position);
+  }
+}
+
+async function checkOperatorSession() {
+  try {
+    state.operator = await api('/api/operator/me');
+    $('#operatorLogin').hidden = true;
+    $('#operatorConsole').hidden = false;
+    $('#operatorIdentity').textContent = state.operator.email;
+    await loadOperatorJobs();
+  } catch {
+    state.operator = null;
+    $('#operatorLogin').hidden = false;
+    $('#operatorConsole').hidden = true;
+  }
+}
+
+async function operatorLogin(event) {
+  event.preventDefault();
+  const errorNode = $('#loginError');
+  errorNode.textContent = '';
+  try {
+    if (!state.config.identityPlatformApiKey) throw new Error('Operator authentication is not configured.');
+    const response = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encodeURIComponent(state.config.identityPlatformApiKey)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ amount: newJob.price, description: `Pin & Pedal repair (${newJob.id})` })
-    }).then(r => r.json());
-  } catch {}
-
-  if (pay.checkoutUrl) {
-    location.href = pay.checkoutUrl;
-    return;
+      body: JSON.stringify({ email: $('#operatorEmail').value.trim(), password: $('#operatorPassword').value, returnSecureToken: true })
+    });
+    const identity = await response.json();
+    if (!response.ok) throw new Error('Email or password was not accepted.');
+    await api('/api/operator/session', { method: 'POST', body: JSON.stringify({ idToken: identity.idToken }) });
+    $('#operatorPassword').value = '';
+    await checkOperatorSession();
+  } catch (error) {
+    errorNode.textContent = error.message;
   }
+}
 
-  toast(`Demo payment accepted — ${newJob.id} booked!`);
-  // Reset booking form state
-  $('#bookingForm').reset();
-  pinSet = false;
-  quote = null;
-  photos = {};
-  if (marker) {
-    marker.remove();
-    marker = null;
-  }
-  $('#pinStatus').textContent = 'Tap anywhere on the map to place your bike pin.';
-  $('#pinStatus').classList.remove('ready');
-  $('#sceneName').textContent = 'Show where it is parked';
-  $('#frameName').textContent = 'Make the full frame visible';
-  $('#tireName').textContent = 'Show tire numbers and markings';
-  collapseForm();
-  showStep(1);
+async function operatorLogout() {
+  await api('/api/operator/session', { method: 'DELETE' });
+  if (state.locationWatchId !== null) navigator.geolocation.clearWatch(state.locationWatchId);
+  state.locationWatchId = null;
+  await checkOperatorSession();
+}
 
-  // Switch to operator dashboard view so user sees the newly created job
-  setTimeout(() => {
-    $$('.nav').forEach(x => x.classList.toggle('active', x.dataset.view === 'ops'));
-    $$('.view').forEach(x => x.classList.toggle('active', x.id === 'ops'));
-  }, 1000);
-};
+function appendText(parent, tag, text, className) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  node.textContent = text;
+  parent.append(node);
+  return node;
+}
 
-$('.brand')?.addEventListener('click', e => {
-  e.preventDefault();
-  collapseForm();
-  showStep(1);
-  $$('.nav').forEach(x => x.classList.toggle('active', x.dataset.view === 'book'));
-  $$('.view').forEach(x => x.classList.toggle('active', x.id === 'book'));
-});
+async function loadOperatorJobs() {
+  const result = await api('/api/operator/jobs');
+  state.jobs = result.jobs;
+  renderJobs();
+  renderMarketing();
+}
 
-// Operator Console & Navigation
-$$('.nav').forEach(b => {
-  b.onclick = () => {
-    $$('.nav').forEach(x => x.classList.remove('active'));
-    $$('.view').forEach(x => x.classList.remove('active'));
-    b.classList.add('active');
-    const viewId = b.dataset.view;
-    $('#' + viewId).classList.add('active');
-    if (viewId === 'book') {
-      if (step === 2) {
-        setTimeout(initOrResizeMap, 100);
-      }
+function renderJobs() {
+  const container = $('#jobList');
+  container.replaceChildren();
+  if (!state.jobs.length) return appendText(container, 'p', 'No bookings are scheduled today.', 'hint');
+  state.jobs.forEach(job => {
+    const card = document.createElement('article');
+    card.className = `jobCard status-${job.status.replaceAll(' ', '-')}`;
+    const top = document.createElement('div');
+    top.className = 'jobTop';
+    appendText(top, 'h3', `${job.timeSlot} · ${job.area}`);
+    appendText(top, 'span', job.status, 'badge');
+    card.append(top);
+    appendText(card, 'p', `${job.id} · €${job.price} · payment: ${job.paymentStatus}`, 'jobMeta');
+    const privateBox = document.createElement('div');
+    privateBox.className = 'privateBox';
+    appendText(privateBox, 'div', `Phone: ${job.phone || 'deleted'}`);
+    appendText(privateBox, 'div', `Access: ${job.accessInstructions || 'deleted'}`);
+    card.append(privateBox);
+    const photos = document.createElement('div');
+    photos.className = 'jobPhotos';
+    (job.photoKinds || []).forEach(kind => {
+      const image = document.createElement('img');
+      image.src = `/api/operator/jobs/${encodeURIComponent(job.id)}/photos/${encodeURIComponent(kind)}`;
+      image.alt = `${kind} identification photo`;
+      photos.append(image);
+    });
+    if (job.completionPhotoAvailable) {
+      const image = document.createElement('img');
+      image.src = `/api/operator/jobs/${encodeURIComponent(job.id)}/photos/completion`;
+      image.alt = 'Completion photo';
+      photos.append(image);
     }
-  };
-});
-
-// Operator Tabs
-$$('.tab').forEach(b => {
-  b.onclick = () => {
-    $$('.tab').forEach(x => x.classList.remove('active'));
-    $$('.panel').forEach(x => x.classList.remove('active'));
-    b.classList.add('active');
-    $('#' + b.dataset.panel).classList.add('active');
-  };
-});
-
-// Reset Demo button
-$('#reset').onclick = () => {
-  jobs = JSON.parse(JSON.stringify(initialSeed));
-  saveJobs();
-  toast('Demo reset to initial 5 Helsinki/Espoo repair jobs.');
-};
-
-// Generate Route Button
-$('#buildRoute').onclick = () => {
-  renderRoutePlan();
-  toast('Route generated and ordered for proximity from Kamppi hub.');
-};
-
-function renderOperatorDashboard() {
-  $('#summary').textContent = `${jobs.length} Helsinki repairs in today’s queue.`;
-  $('#jobCount').textContent = jobs.length;
-
-  // Render Repair Queue
-  $('#jobList').innerHTML = jobs.map(j => `
-    <article class="job status-${j.status.replace(/\s+/g, '.')}">
-      <div class="jobtop">
-        <div>
-          <h3>${j.id} · ${j.address}</h3>
-          <div class="meta">${j.timeSlot} · €${j.price} · ${j.timed ? 'customer present' : 'number-lock flexible'}</div>
-        </div>
-        <span class="badge">${j.status}</span>
-      </div>
-      <div class="private">
-        <strong>Access:</strong> ${j.access}<br>
-        <strong>Phone:</strong> ${j.contact || 'N/A'}
-      </div>
-      <div class="controls">
-        <select data-id="${j.id}" class="statusSelect">
-          <option value="Booked" ${j.status === 'Booked' ? 'selected' : ''}>Booked</option>
-          <option value="En route" ${j.status === 'En route' ? 'selected' : ''}>En route</option>
-          <option value="In progress" ${j.status === 'In progress' ? 'selected' : ''}>In progress</option>
-          <option value="Completed" ${j.status === 'Completed' ? 'selected' : ''}>Completed</option>
-        </select>
-        ${j.status === 'Completed' ? `<button class="mini alt makePostBtn" data-id="${j.id}">Draft Post</button>` : ''}
-      </div>
-    </article>
-  `).join('');
-
-  // Attach status change handlers
-  $$('.statusSelect').forEach(sel => {
-    sel.onchange = e => {
-      const jobId = e.target.dataset.id;
-      const targetJob = jobs.find(j => j.id === jobId);
-      if (targetJob) {
-        targetJob.status = e.target.value;
-        saveJobs();
-        toast(`Updated ${jobId} status to ${targetJob.status}`);
-      }
-    };
+    card.append(photos);
+    const controls = document.createElement('div');
+    controls.className = 'jobControls';
+    const select = document.createElement('select');
+    ['Pending payment', 'Booked', 'En route', 'In progress', 'Completed', 'Cancelled'].forEach(status => {
+      const option = document.createElement('option');
+      option.value = status;
+      option.textContent = status;
+      option.selected = status === job.status;
+      select.append(option);
+    });
+    select.addEventListener('change', () => updateJobStatus(job.id, select.value));
+    controls.append(select);
+    const photoLabel = document.createElement('label');
+    photoLabel.className = 'mini';
+    photoLabel.textContent = 'Completion photo';
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/jpeg,image/png,image/webp';
+    input.hidden = true;
+    input.addEventListener('change', () => uploadCompletion(job.id, input.files[0]));
+    photoLabel.append(input);
+    controls.append(photoLabel);
+    card.append(controls);
+    container.append(card);
   });
-
-  // Attach draft post handlers
-  $$('.makePostBtn').forEach(btn => {
-    btn.onclick = e => {
-      const jobId = e.target.dataset.id;
-      $$('.tab').forEach(x => x.classList.toggle('active', x.dataset.panel === 'marketing'));
-      $$('.panel').forEach(x => x.classList.toggle('active', x.id === 'marketing'));
-      toast(`Switched to Marketing Studio for completed job ${jobId}`);
-    };
-  });
-
-  renderRoutePlan();
-  renderMarketingStudio();
 }
 
-function renderRoutePlan() {
-  const sorted = jobs.slice().sort((a, b) => {
-    if (a.timed && !b.timed) return -1;
-    if (!a.timed && b.timed) return 1;
-    if (a.timed && b.timed) return a.timeSlot.localeCompare(b.timeSlot);
-    return d(origin, a.coords) - d(origin, b.coords);
-  });
-
-  $('#routeList').innerHTML = sorted.map((j, i) => {
-    const distFromOrigin = d(origin, j.coords).toFixed(1);
-    return `<li><strong>${j.address} (${j.id})</strong><small>${j.timeSlot} · ${distFromOrigin} km from Kamppi hub · Status: ${j.status}</small></li>`;
-  }).join('');
+async function updateJobStatus(id, status) {
+  try {
+    await api(`/api/operator/jobs/${encodeURIComponent(id)}/status`, { method: 'PATCH', body: JSON.stringify({ status }) });
+    toast(`Status updated to ${status}.`);
+    await loadOperatorJobs();
+  } catch (error) { toast(error.message); await loadOperatorJobs(); }
 }
 
-function renderMarketingStudio() {
-  const completedJobs = jobs.filter(j => j.status === 'Completed');
-  $('#draftCount').textContent = completedJobs.length;
+async function uploadCompletion(id, file) {
+  if (!file) return;
+  try {
+    const data = await compressPhoto(file);
+    await api(`/api/operator/jobs/${encodeURIComponent(id)}/completion-photo`, { method: 'POST', body: JSON.stringify({ data }) });
+    toast('Completion photo stored privately.');
+    await loadOperatorJobs();
+  } catch (error) { toast(error.message); }
+}
 
-  if (!completedJobs.length) {
-    $('#marketingList').innerHTML = '<div class="empty">Complete a repair job in the queue to generate marketing drafts.</div>';
+async function loadRoute() {
+  const button = $('#routeBtn');
+  button.disabled = true;
+  try {
+    const route = await api('/api/operator/route');
+    $('#routeSummary').textContent = `${route.totalKm} km · approximately ${route.totalMinutes} cycling minutes`;
+    const list = $('#routeList');
+    list.replaceChildren();
+    route.jobs.forEach(job => appendText(list, 'li', `${job.timeSlot} · ${job.area} · ${job.status}`));
+    $('#navigationLink').href = route.navigationUrl;
+    $('#navigationLink').hidden = false;
+  } catch (error) { toast(error.message); }
+  finally { button.disabled = false; }
+}
+
+function renderMarketing() {
+  const container = $('#marketingList');
+  container.replaceChildren();
+  const completed = state.jobs.filter(job => job.status === 'Completed');
+  if (!completed.length) return appendText(container, 'p', 'Complete a repair before creating a marketing draft.', 'hint');
+  completed.forEach(job => {
+    const card = document.createElement('article');
+    card.className = 'marketingCard';
+    appendText(card, 'h3', job.marketing?.title || `${job.area} repair`);
+    appendText(card, 'p', job.marketing?.caption || 'No draft has been created.');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'mini';
+    if (!job.marketing) {
+      button.textContent = 'Create privacy-safe draft';
+      button.addEventListener('click', () => createMarketingDraft(job.id));
+    } else if (job.marketing.status === 'draft') {
+      button.textContent = 'Approve & publish';
+      button.addEventListener('click', () => publishMarketing(job.id));
+    } else {
+      button.textContent = 'Published';
+      button.disabled = true;
+    }
+    card.append(button);
+    container.append(card);
+  });
+}
+
+async function createMarketingDraft(id) {
+  try { await api(`/api/operator/jobs/${encodeURIComponent(id)}/marketing/draft`, { method: 'POST', body: '{}' }); await loadOperatorJobs(); }
+  catch (error) { toast(error.message); }
+}
+
+async function publishMarketing(id) {
+  try { await api(`/api/operator/jobs/${encodeURIComponent(id)}/marketing/publish`, { method: 'POST', body: '{}' }); toast('Social provider confirmed publication.'); await loadOperatorJobs(); }
+  catch (error) { toast(error.message); }
+}
+
+function toggleLiveLocation() {
+  if (state.locationWatchId !== null) {
+    navigator.geolocation.clearWatch(state.locationWatchId);
+    state.locationWatchId = null;
+    $('#trackLocationBtn').textContent = 'Start live GPS';
+    return;
+  }
+  if (!navigator.geolocation) return toast('This device does not support GPS.');
+  state.locationWatchId = navigator.geolocation.watchPosition(async position => {
+    try {
+      await api('/api/operator/location', {
+        method: 'POST',
+        body: JSON.stringify({ lat: position.coords.latitude, lng: position.coords.longitude, accuracy: position.coords.accuracy })
+      });
+      $('#trackLocationBtn').textContent = 'Stop live GPS';
+    } catch (error) { toast(error.message); }
+  }, () => toast('GPS permission was not granted.'), { enableHighAccuracy: true, maximumAge: 15000, timeout: 15000 });
+}
+
+async function initialize() {
+  try {
+    state.config = await api('/api/config');
+    if (!state.config.paymentsConfigured) {
+      const notice = $('#serviceNotice');
+      notice.hidden = false;
+      notice.textContent = 'Bookings are temporarily paused while secure payment configuration is completed. Quotes and operator tools remain available.';
+    }
+  } catch (error) {
+    const notice = $('#serviceNotice');
+    notice.hidden = false;
+    notice.textContent = `Service configuration could not load: ${error.message}`;
     return;
   }
 
-  $('#marketingList').innerHTML = completedJobs.map(j => {
-    const area = j.address.split(' ')[0] || 'Helsinki';
-    return `
-      <article class="post">
-        <div class="postStatus">READY FOR REVIEW · PRIVACY SAFE</div>
-        <h3>Same-day puncture repair in ${area}</h3>
-        <p>Another rider rescued today! Fast, mobile puncture repair on-site in ${area}. Book online with live route pricing.</p>
-        <div class="placeholder"></div>
-        <button class="mini primary pubBtn" data-id="${j.id}">Approve & Publish</button>
-      </article>
-    `;
-  }).join('');
-
-  $$('.pubBtn').forEach(btn => {
-    btn.onclick = () => toast('Marketing post approved & scheduled for publication!');
+  $$('.nav').forEach(button => button.addEventListener('click', () => showView(button.dataset.view)));
+  $('#brandBtn').addEventListener('click', () => { showView('book'); showStep(1); });
+  $$('.next').forEach(button => button.addEventListener('click', () => {
+    try { validateStep(state.step); showStep(Math.min(5, state.step + 1)); } catch (error) { toast(error.message); }
+  }));
+  $$('.back').forEach(button => button.addEventListener('click', () => showStep(Math.max(1, state.step - 1))));
+  $$('#accessType .choice').forEach(button => button.addEventListener('click', () => {
+    $$('#accessType .choice').forEach(node => node.classList.remove('selected'));
+    button.classList.add('selected');
+    state.accessType = button.dataset.value;
+  }));
+  $('#locateBtn').addEventListener('click', () => navigator.geolocation?.getCurrentPosition(position => {
+    initMap().then(() => { state.map.panTo({ lat: position.coords.latitude, lng: position.coords.longitude }); state.map.setZoom(14); setPin(position.coords.latitude, position.coords.longitude); });
+  }, () => toast('GPS permission was not granted.'), { enableHighAccuracy: true, timeout: 10000 }));
+  $('#findSlotsBtn').addEventListener('click', findAppointments);
+  [['scenePhoto', 'scene', 'sceneName'], ['framePhoto', 'frame', 'frameName'], ['tirePhoto', 'tire', 'tireName']].forEach(([inputId, kind, nameId]) => {
+    $(`#${inputId}`).addEventListener('change', async event => {
+      try { state.photos[kind] = await compressPhoto(event.target.files[0]); $(`#${nameId}`).textContent = 'Ready · compressed privately'; }
+      catch (error) { state.photos[kind] = null; toast(error.message); }
+    });
   });
+  $('#bookingForm').addEventListener('submit', submitBooking);
+  $('#operatorLoginForm').addEventListener('submit', operatorLogin);
+  $('#logoutBtn').addEventListener('click', operatorLogout);
+  $('#trackLocationBtn').addEventListener('click', toggleLiveLocation);
+  $('#routeBtn').addEventListener('click', loadRoute);
+  $$('.tab').forEach(button => button.addEventListener('click', () => {
+    $$('.tab').forEach(node => node.classList.remove('active'));
+    $$('.panel').forEach(node => node.classList.remove('active'));
+    button.classList.add('active');
+    $(`#${button.dataset.panel}`).classList.add('active');
+  }));
+  await refreshBookingResult();
+  await pollLive();
+  setInterval(pollLive, 20000);
 }
 
-// Initial render
-renderOperatorDashboard();
-
+initialize();
