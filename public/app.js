@@ -295,9 +295,112 @@ let googleMap = null;
 let googleAdvancedMarkers = [];
 let googlePolylines = [];
 let googleGeocoder = null;
+let directionsService = null;
+
+// High-Resolution Helsinki & Espoo Cycling Street Coordinates
+const helsinkiBikingCorridor = [
+  // 1. Kamppi Depot to Töölöntorinkatu 4 (via Baana & Arkadiankatu cycleway)
+  [60.1699, 24.9384],
+  [60.1706, 24.9352],
+  [60.1718, 24.9312],
+  [60.1742, 24.9275],
+  [60.1765, 24.9255],
+  [60.1782, 24.9248], // Stop 1 (Töölöntorinkatu 4)
+
+  // 2. Töölöntorinkatu 4 to Hämeentie 22, Kallio (via Töölönlahti cycleway & Hakaniemi)
+  [60.1795, 24.9295],
+  [60.1812, 24.9365],
+  [60.1825, 24.9430],
+  [60.1838, 24.9510],
+  [60.1856, 24.9567], // Stop 2 (Hämeentie 22)
+
+  // 3. Hämeentie 22 to Mannerheimintie 100, Meilahti (via Sturenkatu & Nordenskiöldinkatu bike path)
+  [60.1882, 24.9520],
+  [60.1901, 24.9415],
+  [60.1910, 24.9280],
+  [60.1912, 24.9180],
+  [60.1912, 24.9085], // Stop 3 (Mannerheimintie 100)
+
+  // 4. Mannerheimintie 100 to Otakaari 1, Otaniemi (via Paciuksenkatu, Kuusisaari & Lehtisaari coastal bike bridge)
+  [60.1905, 24.8965],
+  [60.1880, 24.8810],
+  [60.1855, 24.8625],
+  [60.1830, 24.8465],
+  [60.1848, 24.8340],
+  [60.1868, 24.8277], // Stop 4 (Otakaari 1, Otaniemi)
+
+  // 5. Otakaari 1 to Itämerenkatu 12, Ruoholahti (via Keilaniemi, Lauttasaari bridge & Porkkalankatu)
+  [60.1785, 24.8315],
+  [60.1690, 24.8520],
+  [60.1635, 24.8760],
+  [60.1615, 24.8980],
+  [60.1634, 24.9152], // Stop 5 (Itämerenkatu 12)
+
+  // 6. Itämerenkatu 12 back to Kamppi Depot (via Ruoholahdenranta & Baana cycle tunnel)
+  [60.1648, 24.9240],
+  [60.1672, 24.9330],
+  [60.1699, 24.9384]  // Kamppi Hub (Depot return)
+];
+
+// Current Simulated Mechanic Position (En route near Stop 3 on Mannerheimintie)
+const currentMechanicPos = [60.1911, 24.9215];
+
+// Render Interactive Route Schedule Timeline Chips
+function renderRouteTimelineChips(chosenSlot) {
+  const container = $('#routeTimelineChips');
+  if (!container) return;
+
+  const timelineItems = [
+    { time: '07:00', title: 'Kamppi Hub', status: 'Departed', type: 'depot', coords: origin },
+    { time: '08:30', title: 'Stop 1 · Töölö', status: 'Completed ✅', type: 'completed', coords: [60.1782, 24.9248] },
+    { time: '10:15', title: 'Stop 2 · Kallio', status: 'Completed ✅', type: 'completed', coords: [60.1856, 24.9567] },
+    { time: '11:45', title: 'Stop 3 · Meilahti', status: 'En route 🚴', type: 'en-route', coords: [60.1912, 24.9085] },
+    { time: '13:30', title: 'Stop 4 · Otaniemi', status: 'Scheduled ⏳', type: 'booked', coords: [60.1868, 24.8277] },
+    { time: '15:00', title: 'Stop 5 · Ruoholahti', status: 'Scheduled ⏳', type: 'booked', coords: [60.1634, 24.9152] },
+    { time: '17:00', title: 'Kamppi Hub', status: 'Day Finish', type: 'depot', coords: origin }
+  ];
+
+  if (chosenSlot && chosenSlot.isFeasible) {
+    const custItem = {
+      time: chosenSlot.timeStr,
+      title: `Your Bike · €${chosenSlot.price}`,
+      status: chosenSlot.tag,
+      type: 'active',
+      coords: $('#coords').value.split(',').map(Number)
+    };
+    let idx = timelineItems.findIndex(x => x.time > chosenSlot.timeStr);
+    if (idx < 0) idx = timelineItems.length - 1;
+    timelineItems.splice(idx, 0, custItem);
+  }
+
+  container.innerHTML = timelineItems.map(item => `
+    <div class="timelineChip ${item.type}" data-lat="${item.coords[0]}" data-lng="${item.coords[1]}">
+      <span class="chipTime">${item.time}</span>
+      <span class="chipTitle">${item.title}</span>
+      <span class="chipStatus">${item.status}</span>
+    </div>
+  `).join('');
+
+  $$('.timelineChip').forEach(chip => {
+    chip.onclick = () => {
+      const lat = +chip.dataset.lat;
+      const lng = +chip.dataset.lng;
+      if (!isNaN(lat) && !isNaN(lng)) {
+        if (googleMap) {
+          googleMap.panTo({ lat, lng });
+          googleMap.setZoom(14);
+        } else if (bookingMap) {
+          bookingMap.flyTo([lat, lng], 14, { animate: true, duration: 1 });
+        }
+      }
+    };
+  });
+}
 
 // Live Map Route Polyline & Markers (Supports Google Maps Platform & Mapbox)
 function renderMapPlannedRoute(customerCoords, chosenSlot) {
+  renderRouteTimelineChips(chosenSlot);
+
   // --- A. Google Maps Platform Rendering ---
   if (googleMap && window.google && window.google.maps) {
     // Clear previous Google markers & polylines
@@ -311,25 +414,26 @@ function renderMapPlannedRoute(customerCoords, chosenSlot) {
     // 1. Kamppi Depot Marker
     const depotDiv = document.createElement('div');
     depotDiv.className = 'depot-marker';
-    depotDiv.innerHTML = '🚲';
-    depotDiv.style.cursor = 'pointer';
+    depotDiv.innerHTML = '🏛️';
+    depotDiv.title = 'Kamppi Hub (07:00 start & 17:00 finish)';
 
     if (google.maps.marker && google.maps.marker.AdvancedMarkerElement) {
       const depotMarker = new google.maps.marker.AdvancedMarkerElement({
         map: googleMap,
         position: { lat: origin[0], lng: origin[1] },
-        title: '🏛️ Kamppi Hub (Depot) - 07:00 dispatch & 17:00 return',
+        title: 'Kamppi Hub',
         content: depotDiv
       });
       googleAdvancedMarkers.push(depotMarker);
     }
 
-    // 2. Active Scheduled Stops 1..5
+    // 2. Active Scheduled Stops 1..5 with time badges
     activeJobs.forEach((j, i) => {
       const stopDiv = document.createElement('div');
       stopDiv.className = 'stop-number-marker';
-      stopDiv.innerHTML = `<span>${i + 1}</span>`;
-      stopDiv.title = `Stop ${i + 1}: ${j.address} (${j.timeSlot})`;
+      const timeShort = j.timeSlot.split('–')[0] || '';
+      stopDiv.innerHTML = `<span>#${i + 1}</span><small style="font-size:9px;opacity:0.9;">${timeShort}</small>`;
+      stopDiv.title = `Stop ${i + 1}: ${j.address} (${j.timeSlot}) · Status: ${j.status}`;
 
       if (google.maps.marker && google.maps.marker.AdvancedMarkerElement) {
         const stopMarker = new google.maps.marker.AdvancedMarkerElement({
@@ -342,11 +446,27 @@ function renderMapPlannedRoute(customerCoords, chosenSlot) {
       }
     });
 
-    // 3. Customer Marker
+    // 3. Live Mechanic Pulse Marker (Current real-time location on bike path)
+    const mechDiv = document.createElement('div');
+    mechDiv.className = 'mechanic-pulse-marker';
+    mechDiv.innerHTML = '🚴';
+    mechDiv.title = 'Live Mechanic: Juho (En route on Mannerheimintie, next stop 11:45)';
+
+    if (google.maps.marker && google.maps.marker.AdvancedMarkerElement) {
+      const mechMarker = new google.maps.marker.AdvancedMarkerElement({
+        map: googleMap,
+        position: { lat: currentMechanicPos[0], lng: currentMechanicPos[1] },
+        title: '🚴 Mechanic Juho is en route to Mannerheimintie (ETA 11:45)',
+        content: mechDiv
+      });
+      googleAdvancedMarkers.push(mechMarker);
+    }
+
+    // 4. Customer Marker
     if (customerCoords) {
       const pinDiv = document.createElement('div');
       pinDiv.className = 'custom-pin-marker';
-      pinDiv.innerHTML = '<div style="background:#ff6647;width:24px;height:24px;border-radius:50%;border:3px solid #fff;box-shadow:0 3px 10px rgba(255,102,71,0.5);position:relative;"><div style="position:absolute;bottom:-7px;left:9px;width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:7px solid #ff6647;"></div></div>';
+      pinDiv.innerHTML = '<div style="background:#ff6647;width:26px;height:26px;border-radius:50%;border:3px solid #fff;box-shadow:0 3px 12px rgba(255,102,71,0.6);display:flex;align-items:center;justify-content:center;color:#fff;font-size:13px;position:relative;">📍<div style="position:absolute;bottom:-7px;left:10px;width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:7px solid #ff6647;"></div></div>';
       pinDiv.title = 'Your Bike Location';
 
       if (google.maps.marker && google.maps.marker.AdvancedMarkerElement) {
@@ -360,66 +480,41 @@ function renderMapPlannedRoute(customerCoords, chosenSlot) {
       }
     }
 
-    // 4. Sequenced Google Route Polylines
-    const routeLatLngs = [{ lat: origin[0], lng: origin[1] }];
-    activeJobs.forEach(j => routeLatLngs.push({ lat: j.coords[0], lng: j.coords[1] }));
-    routeLatLngs.push({ lat: origin[0], lng: origin[1] });
+    // 5. Draw Cycling Route Polylines on Helsinki Bike Paths
+    const googleBikingPath = helsinkiBikingCorridor.map(pt => ({ lat: pt[0], lng: pt[1] }));
 
-    if (customerCoords && chosenSlot && chosenSlot.isFeasible) {
-      const customerSeq = [{ lat: origin[0], lng: origin[1] }];
-      let inserted = false;
+    const basePolyline = new google.maps.Polyline({
+      path: googleBikingPath,
+      geodesic: true,
+      strokeColor: '#2b7336',
+      strokeOpacity: 0.85,
+      strokeWeight: 4.5,
+      map: googleMap
+    });
+    googlePolylines.push(basePolyline);
 
-      activeJobs.forEach(j => {
-        if (!inserted && j.timeSlot > chosenSlot.slotLabel) {
-          customerSeq.push({ lat: customerCoords[0], lng: customerCoords[1] });
-          inserted = true;
-        }
-        customerSeq.push({ lat: j.coords[0], lng: j.coords[1] });
-      });
+    // Customer Cycling Detour Leg
+    if (customerCoords && chosenSlot && chosenSlot.isFeasible && chosenSlot.prevStop && chosenSlot.nextStop) {
+      const detourPath = [
+        { lat: chosenSlot.prevStop.coords[0], lng: chosenSlot.prevStop.coords[1] },
+        { lat: customerCoords[0], lng: customerCoords[1] },
+        { lat: chosenSlot.nextStop.coords[0], lng: chosenSlot.nextStop.coords[1] }
+      ];
 
-      if (!inserted) customerSeq.push({ lat: customerCoords[0], lng: customerCoords[1] });
-      customerSeq.push({ lat: origin[0], lng: origin[1] });
-
-      const basePolyline = new google.maps.Polyline({
-        path: customerSeq,
+      const detourPolyline = new google.maps.Polyline({
+        path: detourPath,
         geodesic: true,
-        strokeColor: '#2b7336',
-        strokeOpacity: 0.8,
-        strokeWeight: 4,
+        strokeColor: '#ff6647',
+        strokeOpacity: 0.95,
+        strokeWeight: 5.5,
         map: googleMap
       });
-      googlePolylines.push(basePolyline);
-
-      if (chosenSlot.prevStop && chosenSlot.nextStop) {
-        const detourPolyline = new google.maps.Polyline({
-          path: [
-            { lat: chosenSlot.prevStop.coords[0], lng: chosenSlot.prevStop.coords[1] },
-            { lat: customerCoords[0], lng: customerCoords[1] },
-            { lat: chosenSlot.nextStop.coords[0], lng: chosenSlot.nextStop.coords[1] }
-          ],
-          geodesic: true,
-          strokeColor: '#ff6647',
-          strokeOpacity: 0.95,
-          strokeWeight: 5,
-          map: googleMap
-        });
-        googlePolylines.push(detourPolyline);
-      }
-    } else {
-      const basePolyline = new google.maps.Polyline({
-        path: routeLatLngs,
-        geodesic: true,
-        strokeColor: '#4fa168',
-        strokeOpacity: 0.7,
-        strokeWeight: 3.5,
-        map: googleMap
-      });
-      googlePolylines.push(basePolyline);
+      googlePolylines.push(detourPolyline);
     }
     return;
   }
 
-  // --- B. Leaflet / Mapbox Rendering ---
+  // --- B. Leaflet / Mapbox Rendering Fallback ---
   if (!bookingMap) return;
 
   if (!routeLayerGroup) {
@@ -431,7 +526,7 @@ function renderMapPlannedRoute(customerCoords, chosenSlot) {
   // 1. Kamppi Depot Base
   const depotIcon = L.divIcon({
     className: 'depot-marker',
-    html: '🚲',
+    html: '🏛️',
     iconSize: [28, 28],
     iconAnchor: [14, 14]
   });
@@ -442,18 +537,30 @@ function renderMapPlannedRoute(customerCoords, chosenSlot) {
   // 2. Active Seed Bookings (1..5)
   const activeJobs = jobs.filter(j => j.coords && j.coords.length === 2);
   activeJobs.forEach((j, i) => {
+    const timeShort = j.timeSlot.split('–')[0] || '';
     const stopNumIcon = L.divIcon({
       className: 'stop-number-marker',
-      html: `<span>${i + 1}</span>`,
-      iconSize: [24, 24],
-      iconAnchor: [12, 12]
+      html: `<span>#${i + 1}</span><small style="font-size:9px;">${timeShort}</small>`,
+      iconSize: [40, 24],
+      iconAnchor: [20, 12]
     });
     L.marker(j.coords, { icon: stopNumIcon })
       .bindPopup(`<strong>Stop ${i + 1}: ${j.address}</strong><br>Time: ${j.timeSlot}<br>Status: ${j.status}`)
       .addTo(routeLayerGroup);
   });
 
-  // 3. Customer Marker
+  // 3. Live Mechanic Pulse Marker on Leaflet
+  const mechIcon = L.divIcon({
+    className: 'mechanic-pulse-marker',
+    html: '🚴',
+    iconSize: [32, 32],
+    iconAnchor: [16, 16]
+  });
+  L.marker(currentMechanicPos, { icon: mechIcon })
+    .bindPopup('<strong>🚴 Mechanic En Route</strong><br>Juho is on Mannerheimintie heading to Stop 3 (ETA 11:45)')
+    .addTo(routeLayerGroup);
+
+  // 4. Customer Marker
   if (customerCoords) {
     const pinIcon = L.divIcon({
       className: 'custom-pin-marker',
@@ -468,51 +575,22 @@ function renderMapPlannedRoute(customerCoords, chosenSlot) {
       .addTo(routeLayerGroup);
   }
 
-  // 4. Sequenced Route Line
-  const routePoints = [origin];
-  activeJobs.forEach(j => routePoints.push(j.coords));
-  routePoints.push(origin);
+  // 5. Draw Cycling Route on Helsinki Bike Corridor
+  L.polyline(helsinkiBikingCorridor, {
+    color: '#2b7336',
+    weight: 4.5,
+    opacity: 0.85,
+    lineCap: 'round',
+    lineJoin: 'round'
+  }).addTo(routeLayerGroup);
 
-  if (customerCoords && chosenSlot && chosenSlot.isFeasible) {
-    const customerRouteSequence = [origin];
-    let inserted = false;
-
-    activeJobs.forEach(j => {
-      if (!inserted && j.timeSlot > chosenSlot.slotLabel) {
-        customerRouteSequence.push(customerCoords);
-        inserted = true;
-      }
-      customerRouteSequence.push(j.coords);
-    });
-
-    if (!inserted) {
-      customerRouteSequence.push(customerCoords);
-    }
-    customerRouteSequence.push(origin);
-
-    L.polyline(customerRouteSequence, {
-      color: '#2b7336',
-      weight: 4,
-      opacity: 0.8,
-      dashArray: '4, 6',
+  if (customerCoords && chosenSlot && chosenSlot.isFeasible && chosenSlot.prevStop && chosenSlot.nextStop) {
+    L.polyline([chosenSlot.prevStop.coords, customerCoords, chosenSlot.nextStop.coords], {
+      color: '#ff6647',
+      weight: 5.5,
+      opacity: 0.95,
+      lineCap: 'round',
       lineJoin: 'round'
-    }).addTo(routeLayerGroup);
-
-    if (chosenSlot.prevStop && chosenSlot.nextStop) {
-      L.polyline([chosenSlot.prevStop.coords, customerCoords, chosenSlot.nextStop.coords], {
-        color: '#ff6647',
-        weight: 5,
-        opacity: 0.95,
-        lineCap: 'round',
-        lineJoin: 'round'
-      }).addTo(routeLayerGroup);
-    }
-  } else {
-    L.polyline(routePoints, {
-      color: '#4fa168',
-      weight: 3.5,
-      opacity: 0.7,
-      dashArray: '4, 6'
     }).addTo(routeLayerGroup);
   }
 }
@@ -599,8 +677,8 @@ async function initOrResizeMap() {
   const gmapsKey = config.googleMapsApiKey || '';
   const mapboxToken = config.mapboxPublicToken || '';
 
-  // If Google Maps API key is configured, load Google Maps Platform
-  if (gmapsKey) {
+  // 1. Google Maps Platform Initializer
+  if (gmapsKey || window.google?.maps) {
     try {
       if (!window.google || !window.google.maps) {
         await new Promise((resolve, reject) => {
@@ -640,7 +718,23 @@ async function initOrResizeMap() {
     }
   }
 
+  // 2. Leaflet Fallback Provider
   try {
+    // Dynamically load Leaflet assets if not already on page
+    if (!window.L) {
+      const link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+      document.head.appendChild(link);
+
+      await new Promise(resolve => {
+        const script = document.createElement('script');
+        script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+        script.onload = resolve;
+        document.head.appendChild(script);
+      });
+    }
+
     bookingMap = L.map('map', {
       center: [60.178, 24.920], // Center over Helsinki/Espoo service corridor
       zoom: 12,
@@ -652,10 +746,10 @@ async function initOrResizeMap() {
     const mapboxTileUrl = `https://api.mapbox.com/styles/v1/mapbox/streets-v12/tiles/512/{z}/{x}/{y}@2x?access_token=${mapboxToken}`;
     const cartoTileUrl = 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png';
 
-    const tiles = L.tileLayer(mapboxTileUrl, {
+    const tiles = L.tileLayer(mapboxToken ? mapboxTileUrl : cartoTileUrl, {
       maxZoom: 19,
-      tileSize: 512,
-      zoomOffset: -1,
+      tileSize: mapboxToken ? 512 : 256,
+      zoomOffset: mapboxToken ? -1 : 0,
       attribution: '© <a href="https://www.mapbox.com/about/maps/">Mapbox</a> © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
     }).addTo(bookingMap);
 
